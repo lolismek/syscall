@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>syscall — evolutionary swarm</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --text: #e0e0e8;
+    --dim: #6a6a80;
+    --accent: #7c5cfc;
+    --accent2: #5cf0c8;
+    --red: #ff5555;
+    --green: #50fa7b;
+    --yellow: #f1fa8c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 20px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto 1fr 1fr;
+    gap: 16px;
+    max-width: 1400px;
+    margin: 0 auto;
+    height: calc(100vh - 40px);
+  }
+  .header { grid-column: 1 / -1; }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--dim);
+    margin-bottom: 12px;
+    flex-shrink: 0;
+  }
+
+  /* Header */
+  .header {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: -0.5px;
+  }
+  .header h1 span { color: var(--dim); font-weight: 400; }
+  .stats {
+    display: flex;
+    gap: 32px;
+  }
+  .stat {
+    text-align: center;
+  }
+  .stat-value {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .stat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--dim);
+  }
+  .phase-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .phase-waiting { background: #2a2a3a; color: var(--dim); }
+  .phase-generating { background: #1a2a1a; color: var(--green); }
+  .phase-evolving { background: #1a1a3a; color: var(--accent); }
+  .phase-stopped { background: #2a1a1a; color: var(--red); }
+
+  /* Leaderboard */
+  .leaderboard { overflow-y: auto; flex: 1; }
+  .lb-table { width: 100%; border-collapse: collapse; }
+  .lb-table th {
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--dim);
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+  }
+  .lb-table td {
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .lb-table tr:hover td { background: rgba(124, 92, 252, 0.05); }
+  .rank {
+    width: 40px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .rank-1 { color: var(--yellow); }
+  .time-val { color: var(--accent2); font-weight: 600; }
+
+  /* Chart */
+  .chart-container {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+  }
+  canvas {
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  /* Log */
+  .log-container {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+  }
+  .log-entry {
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(30, 30, 46, 0.5);
+    font-size: 12px;
+  }
+  .log-time { color: var(--dim); margin-right: 8px; }
+  .log-pass { color: var(--green); }
+  .log-fail { color: var(--red); }
+
+  /* Connection status */
+  .conn-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .conn-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+  }
+  .conn-dot.connected { background: var(--green); }
+
+  /* Code preview modal */
+  .code-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .code-overlay.show { display: flex; }
+  .code-modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 700px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .code-modal pre {
+    background: var(--bg);
+    padding: 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .code-modal h3 { margin-bottom: 12px; color: var(--accent); }
+  .close-btn {
+    float: right;
+    background: none;
+    border: none;
+    color: var(--dim);
+    font-size: 20px;
+    cursor: pointer;
+  }
+  .close-btn:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<div class="grid">
+  <div class="header">
+    <div>
+      <h1>syscall <span>/ evolutionary swarm</span></h1>
+    </div>
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value" id="gen">0</div>
+        <div class="stat-label">Generation</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="agents">0</div>
+        <div class="stat-label">Agents</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="subs">0</div>
+        <div class="stat-label">Submissions</div>
+      </div>
+      <div class="stat">
+        <div id="phase" class="phase-badge phase-waiting">waiting</div>
+        <div class="stat-label" style="margin-top:4px">Phase</div>
+      </div>
+    </div>
+    <div class="conn-status">
+      <div class="conn-dot" id="connDot"></div>
+      <span id="connText">disconnected</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Leaderboard</div>
+    <div class="leaderboard">
+      <table class="lb-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Agent</th>
+            <th>Time (ms)</th>
+            <th>Gen</th>
+          </tr>
+        </thead>
+        <tbody id="lbBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Best Time / Generation</div>
+    <div class="chart-container">
+      <canvas id="chart"></canvas>
+    </div>
+  </div>
+
+  <div class="panel" style="grid-column: 1 / -1;">
+    <div class="panel-title">Activity Log</div>
+    <div class="log-container" id="logContainer"></div>
+  </div>
+</div>
+
+<div class="code-overlay" id="codeOverlay">
+  <div class="code-modal">
+    <button class="close-btn" onclick="closeCode()">&times;</button>
+    <h3 id="codeTitle"></h3>
+    <pre id="codeContent"></pre>
+  </div>
+</div>
+
+<script>
+const ws_url = `ws://${location.host}/ws/dashboard`;
+let ws = null;
+let history = [];
+let topK = [];
+
+function connect() {
+  ws = new WebSocket(ws_url);
+  ws.onopen = () => {
+    document.getElementById('connDot').classList.add('connected');
+    document.getElementById('connText').textContent = 'connected';
+    addLog('Connected to server', 'pass');
+  };
+  ws.onclose = () => {
+    document.getElementById('connDot').classList.remove('connected');
+    document.getElementById('connText').textContent = 'disconnected';
+    addLog('Disconnected — reconnecting...', 'fail');
+    setTimeout(connect, 2000);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'state_update') handleState(msg);
+  };
+}
+
+function handleState(msg) {
+  const s = msg.state;
+  history = msg.history || [];
+  topK = s.top_k || [];
+
+  document.getElementById('gen').textContent = s.generation;
+  document.getElementById('agents').textContent = s.connected_agents;
+  document.getElementById('subs').textContent = s.all_submissions_count;
+
+  const phaseEl = document.getElementById('phase');
+  phaseEl.textContent = s.phase;
+  phaseEl.className = 'phase-badge phase-' + s.phase;
+
+  renderLeaderboard(s.top_k);
+  renderChart();
+
+  if (s.best_time_ms !== null && s.best_time_ms !== undefined) {
+    addLog(`Gen ${s.generation}: best ${s.best_time_ms.toFixed(1)}ms — ${s.all_submissions_count} submissions`);
+  }
+}
+
+function renderLeaderboard(entries) {
+  const tbody = document.getElementById('lbBody');
+  tbody.innerHTML = '';
+  (entries || []).forEach((e, i) => {
+    const tr = document.createElement('tr');
+    tr.style.cursor = 'pointer';
+    tr.onclick = () => showCode(e);
+    tr.innerHTML = `
+      <td class="rank ${i === 0 ? 'rank-1' : ''}">${i + 1}</td>
+      <td>${esc(e.agent_id)}</td>
+      <td class="time-val">${e.execution_time_ms.toFixed(1)}</td>
+      <td>${e.generation}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderChart() {
+  const canvas = document.getElementById('chart');
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * devicePixelRatio;
+  canvas.height = rect.height * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  const W = rect.width, H = rect.height;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const data = history.filter(h => h.best_time_ms != null);
+  if (data.length < 1) {
+    ctx.fillStyle = '#6a6a80';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for data...', W/2, H/2);
+    return;
+  }
+
+  const pad = { top: 20, right: 20, bottom: 30, left: 60 };
+  const cw = W - pad.left - pad.right;
+  const ch = H - pad.top - pad.bottom;
+
+  const maxGen = Math.max(...data.map(d => d.generation), 1);
+  const times = data.map(d => d.best_time_ms);
+  const minT = Math.min(...times) * 0.9;
+  const maxT = Math.max(...times) * 1.1;
+  const rangeT = maxT - minT || 1;
+
+  const x = (gen) => pad.left + (gen / maxGen) * cw;
+  const y = (t) => pad.top + (1 - (t - minT) / rangeT) * ch;
+
+  // Grid
+  ctx.strokeStyle = '#1e1e2e';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const gy = pad.top + (i / 4) * ch;
+    ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(W - pad.right, gy); ctx.stroke();
+    const val = maxT - (i / 4) * rangeT;
+    ctx.fillStyle = '#6a6a80';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(val.toFixed(0) + 'ms', pad.left - 8, gy + 4);
+  }
+
+  // X axis labels
+  ctx.textAlign = 'center';
+  for (const d of data) {
+    ctx.fillStyle = '#6a6a80';
+    ctx.fillText('G' + d.generation, x(d.generation), H - 8);
+  }
+
+  // Line
+  ctx.beginPath();
+  ctx.strokeStyle = '#7c5cfc';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  data.forEach((d, i) => {
+    const px = x(d.generation), py = y(d.best_time_ms);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.stroke();
+
+  // Gradient fill
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
+  grad.addColorStop(0, 'rgba(124, 92, 252, 0.2)');
+  grad.addColorStop(1, 'rgba(124, 92, 252, 0)');
+  ctx.lineTo(x(data[data.length-1].generation), pad.top + ch);
+  ctx.lineTo(x(data[0].generation), pad.top + ch);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Dots
+  data.forEach(d => {
+    const px = x(d.generation), py = y(d.best_time_ms);
+    ctx.beginPath();
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#7c5cfc';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(px, py, 2, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+  });
+}
+
+function addLog(text, type) {
+  const container = document.getElementById('logContainer');
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  const now = new Date().toLocaleTimeString();
+  const cls = type === 'pass' ? 'log-pass' : type === 'fail' ? 'log-fail' : '';
+  div.innerHTML = `<span class="log-time">${now}</span><span class="${cls}">${esc(text)}</span>`;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  // Keep last 100
+  while (container.children.length > 100) container.removeChild(container.firstChild);
+}
+
+function showCode(entry) {
+  document.getElementById('codeTitle').textContent = `${entry.agent_id} — ${entry.execution_time_ms.toFixed(1)}ms (gen ${entry.generation})`;
+  document.getElementById('codeContent').textContent = entry.code;
+  document.getElementById('codeOverlay').classList.add('show');
+}
+
+function closeCode() {
+  document.getElementById('codeOverlay').classList.remove('show');
+}
+
+document.getElementById('codeOverlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeCode();
+});
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+window.addEventListener('resize', renderChart);
+connect();
+</script>
+</body>
+</html>
