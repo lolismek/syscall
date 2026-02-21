@@ -23,6 +23,10 @@ function parseArgs(): { projectIdea: string | null; fresh: boolean } {
       fresh = true;
     } else if (args[i] === "--wait" || args[i] === "-w") {
       config.agentWaitMs = parseInt(args[++i], 10) * 1000;
+    } else if (args[i] === "--recruiting" || args[i] === "-r") {
+      config.recruitingDurationMs = parseInt(args[++i], 10) * 1000;
+    } else if (args[i] === "--min-agents") {
+      config.minAgents = parseInt(args[++i], 10);
     } else if (args[i] === "--help" || args[i] === "-h") {
       printUsage();
       process.exit(0);
@@ -49,6 +53,8 @@ Options:
   --model, -m    Anthropic model to use (default: ${config.model})
   --fresh        Force re-plan (wipes existing project state)
   --wait, -w     Seconds to wait for agents before assigning tasks (default: ${config.agentWaitMs / 1000}s)
+  --recruiting, -r  Recruiting phase duration in seconds (default: ${config.recruitingDurationMs / 1000}s)
+  --min-agents   Minimum agents to start early (default: ${config.minAgents})
   --help, -h     Show this help
 
 Examples:
@@ -65,6 +71,8 @@ Environment variables (set in .env or shell):
   LOG_LEVEL           debug | info | warn | error (default: info)
   TASK_TIMEOUT_MS     Agent inactivity timeout in ms (default: 900000 = 15min)
   AGENT_WAIT_MS       Wait time in ms for agents to join before tasks start (default: 0)
+  RECRUITING_DURATION_MS  Recruiting phase duration in ms (default: 120000 = 2min)
+  MIN_AGENTS          Minimum agents to trigger early start (default: 1)
   AGENT_API_KEY       Shared API key for /mcp auth (unset = no auth)
   GITHUB_ORG          GitHub organization for auto-creating repos
   GITHUB_TOKEN        GitHub personal access token (required if GITHUB_ORG is set)
@@ -90,6 +98,9 @@ async function main() {
   log.info(`Task timeout: ${config.taskTimeoutMs}ms`);
   if (config.agentWaitMs > 0) {
     log.info(`Agent wait: ${config.agentWaitMs / 1000}s before task assignment`);
+  }
+  if (config.recruitingDurationMs > 0) {
+    log.info(`Recruiting: ${config.recruitingDurationMs / 1000}s (min agents: ${config.minAgents})`);
   }
 
   // Initialize GitHub client if configured
@@ -134,6 +145,22 @@ async function main() {
     }
     console.log("");
   }
+
+  // Recruiting phase timer — check every 5s for projects ready to transition
+  setInterval(() => {
+    for (const ctx of registry.list()) {
+      if (ctx.project.status !== "recruiting") continue;
+      if (!ctx.project.recruitingUntil) continue;
+      const until = new Date(ctx.project.recruitingUntil).getTime();
+      if (Date.now() >= until) {
+        ctx.project.status = "active";
+        ctx.project.recruitingUntil = null;
+        ctx.taskBoard.setProject(ctx.project);
+        const agentCount = ctx.taskBoard.getAllAgents().length;
+        log.info(`Recruiting ended for ${ctx.project.id} — ${agentCount} agent(s) joined. Project → active`);
+      }
+    }
+  }, 5_000);
 
   // Task timeout sweep — check every 60s for timed-out tasks across all projects
   setInterval(() => {

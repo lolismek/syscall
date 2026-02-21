@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ProjectRegistry } from "../state/project-registry.js";
 import { createLogger } from "../utils/logger.js";
+import { config } from "../utils/config.js";
+import { NiaClient } from "../knowledge/nia-client.js";
 
 const log = createLogger("MCP");
 
@@ -110,10 +112,22 @@ function createMcpServer(
       sessionCtx.projectId = project_id;
       sessionCtx.agentId = agent.id;
 
+      // Check if minAgents threshold reached → early transition from recruiting to active
+      if (project.status === "recruiting") {
+        const agentCount = taskBoard.getAllAgents().length;
+        if (agentCount >= project.minAgents) {
+          project.status = "active";
+          project.recruitingUntil = null;
+          project.readyAt = new Date();
+          taskBoard.setProject(project);
+          log.info(`minAgents (${project.minAgents}) reached — project ${project_id} → active`);
+        }
+      }
+
       const tasks = taskBoard.getAllTasks();
       const repoUrl = project.githubRepoUrl || gitRepo.getRepoPath();
 
-      const summary = {
+      const summary: Record<string, unknown> = {
         agentId: agent.id,
         project: {
           id: project.id,
@@ -130,8 +144,24 @@ function createMcpServer(
           "Call report_status when you start working",
           "Work on your assigned branch only",
           "Push your branch, then call submit_result — do NOT merge to main",
+          "Use search_docs with scope 'project' to explore the codebase and find relevant patterns, scope 'general' to search indexed public knowledge (packages, docs, popular repos), or scope 'web' for a broad web search",
+          "Use get_project_context to read specific files by exact path — this is always up-to-date and should be preferred when you know which file you need",
+          "Note: search_docs project results may be slightly behind the latest code. For exact current file contents, always use get_project_context",
         ],
       };
+
+      // If still recruiting, tell the agent to wait
+      if (project.status === "recruiting" && project.recruitingUntil) {
+        const remainingMs = new Date(project.recruitingUntil).getTime() - Date.now();
+        summary.recruiting = {
+          message: "Project is still recruiting agents. Task assignment will begin soon.",
+          recruitingUntil: project.recruitingUntil,
+          remainingSeconds: Math.max(0, Math.ceil(remainingMs / 1000)),
+          connectedAgents: taskBoard.getAllAgents().length,
+          minAgents: project.minAgents,
+        };
+      }
+
       log.info(`Agent joined: ${agent.name} (${agent.id}) on project ${project_id}`);
       return { content: [{ type: "text" as const, text: JSON.stringify(summary, null, 2) }] };
     }
@@ -161,15 +191,19 @@ function createMcpServer(
         taskBoard.touchTask(agent.currentTaskId);
       }
 
-      // Check if project is still in the agent-wait period
-      if (project.readyAt && Date.now() < new Date(project.readyAt).getTime()) {
-        const remainingMs = new Date(project.readyAt).getTime() - Date.now();
+      // Check if project is still recruiting
+      if (project.status === "recruiting") {
+        const recruitingUntil = project.recruitingUntil ? new Date(project.recruitingUntil).getTime() : 0;
+        const remainingMs = Math.max(0, recruitingUntil - Date.now());
         const remainingSec = Math.ceil(remainingMs / 1000);
         return {
           content: [{ type: "text" as const, text: JSON.stringify({
-            message: `Project is waiting for agents to join. Task assignment begins in ${remainingSec}s. Call get_my_task again after that.`,
-            readyAt: project.readyAt,
+            message: `Project is still recruiting agents. Task assignment begins in ${remainingSec}s. Call get_my_task again after that.`,
+            status: "recruiting",
+            recruitingUntil: project.recruitingUntil,
             remainingSeconds: remainingSec,
+            connectedAgents: taskBoard.getAllAgents().length,
+            minAgents: project.minAgents,
           }, null, 2) }],
         };
       }
@@ -244,7 +278,8 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify({
           task: formatTaskForAgent(assigned),
-          instructions: "In your clone: git fetch origin && git checkout -B " + branch + " origin/" + branch,
+          instructions: "In your clone: git fetch origin && git checkout -B " + branch + " origin/" + branch +
+            ". TIP: Use search_docs to explore library docs and find relevant patterns. Use get_project_context to read specific files by path (always up-to-date).",
         }, null, 2) }],
       };
     }
@@ -413,6 +448,104 @@ function createMcpServer(
         results[fp] = await gitRepo.readFileFromMain(fp);
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  // --- Tool: search_docs ---
+  server.tool(
+    "search_docs",
+    "Search for code and documentation. Scope 'project': search this project's codebase and dependency docs. Scope 'general': search all of Nia's indexed public knowledge (packages, popular repos, docs). Scope 'web': search the web for anything.",
+    {
+      agent_id: z.string().describe("Your agent ID"),
+      query: z.string().describe("What to search for"),
+      scope: z.enum(["project", "general", "web"]).default("project").describe("'project' = this repo + deps, 'general' = all indexed public knowledge, 'web' = web search"),
+    },
+    async ({ agent_id, query, scope }) => {
+      if (!config.niaApiKey) {
+        return { content: [{ type: "text" as const, text: "Documentation search not configured. Use get_project_context to read files by path instead." }] };
+      }
+      const ctx = recoverSession(agent_id);
+      if (!ctx) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ error: "No project bound. Call join_project first." }) }] };
+      }
+      const { project, taskBoard } = ctx;
+
+      // Touch task activity timer
+      const agentRecord = taskBoard.getAgent(agent_id);
+      if (agentRecord?.currentTaskId) {
+        taskBoard.touchTask(agentRecord.currentTaskId);
+      }
+
+      const nia = new NiaClient(config.niaApiKey);
+      try {
+        if (scope === "project") {
+          // Scoped to THIS project's repo + its dependency docs only
+          const results = await nia.search(query, {
+            repositories: project.niaRepoId ? [project.niaRepoId] : undefined,
+            data_sources: project.niaSourceIds,
+          });
+          if (!results || results.trim() === "" || results === "{}") {
+            return { content: [{ type: "text" as const, text: "No results found (index may still be building). Use get_project_context to read files by path instead." }] };
+          }
+          return { content: [{ type: "text" as const, text: results }] };
+        } else if (scope === "general") {
+          // Universal search across all of Nia's indexed public knowledge
+          // (npm packages, popular repos, documentation sites, etc.)
+          const results = await nia.search(query);
+          if (!results || results.trim() === "" || results === "{}") {
+            return { content: [{ type: "text" as const, text: "No results found. Try scope 'web' for a broader web search." }] };
+          }
+          return { content: [{ type: "text" as const, text: results }] };
+        } else {
+          // Pure web search
+          const results = await nia.webSearch(query);
+          return { content: [{ type: "text" as const, text: results }] };
+        }
+      } catch (err) {
+        log.warn(`search_docs failed for agent ${agent_id}: ${err}`);
+        return { content: [{ type: "text" as const, text: "Search unavailable. Use get_project_context to read files by path instead." }] };
+      }
+    }
+  );
+
+  // --- Tool: lookup_docs ---
+  server.tool(
+    "lookup_docs",
+    "Read a file from the indexed project codebase or documentation via semantic lookup",
+    {
+      agent_id: z.string().describe("Your agent ID"),
+      query: z.string().describe("Describe the file or content you're looking for"),
+    },
+    async ({ agent_id, query }) => {
+      if (!config.niaApiKey) {
+        return { content: [{ type: "text" as const, text: "Documentation lookup not configured. Use get_project_context to read files by path instead." }] };
+      }
+      const ctx = recoverSession(agent_id);
+      if (!ctx) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ error: "No project bound. Call join_project first." }) }] };
+      }
+      const { project, taskBoard } = ctx;
+
+      const agentRecord = taskBoard.getAgent(agent_id);
+      if (agentRecord?.currentTaskId) {
+        taskBoard.touchTask(agentRecord.currentTaskId);
+      }
+
+      const nia = new NiaClient(config.niaApiKey);
+      try {
+        // Use scoped search to find and return relevant content
+        const results = await nia.search(query, {
+          repositories: project.niaRepoId ? [project.niaRepoId] : undefined,
+          data_sources: project.niaSourceIds,
+        });
+        if (!results || results.trim() === "" || results === "{}") {
+          return { content: [{ type: "text" as const, text: "No results found (index may still be building). Use get_project_context to read files by path instead." }] };
+        }
+        return { content: [{ type: "text" as const, text: results }] };
+      } catch (err) {
+        log.warn(`lookup_docs failed for agent ${agent_id}: ${err}`);
+        return { content: [{ type: "text" as const, text: "Lookup unavailable. Use get_project_context to read files by path instead." }] };
+      }
     }
   );
 

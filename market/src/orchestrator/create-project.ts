@@ -8,14 +8,21 @@ import { Project } from "../types/project.js";
 import { planProject, validateSubmission } from "./actions.js";
 import { config } from "../utils/config.js";
 import { createLogger } from "../utils/logger.js";
+import { NiaClient } from "../knowledge/nia-client.js";
 
 const log = createLogger("CreateProject");
+
+export interface CreateProjectOptions {
+  recruitingDurationMs?: number;
+  minAgents?: number;
+}
 
 export async function createProject(
   projectIdea: string,
   registry: ProjectRegistry,
   githubClient: GitHubClient | null,
   workspacePath: string,
+  options?: CreateProjectOptions,
 ): Promise<ProjectContext> {
   const shortId = crypto.randomBytes(3).toString("hex");
   const projectId = `proj-${shortId}`;
@@ -57,17 +64,50 @@ export async function createProject(
     }
   }
 
+  // Fire-and-forget: index repo and dependency docs via Nia
+  let niaRepoId: string | undefined;
+  const niaSourceIds: string[] = [];
+  if (config.niaApiKey && githubRepoName && config.githubOrg) {
+    const nia = new NiaClient(config.niaApiKey);
+
+    // Index the project's GitHub repo
+    niaRepoId = `${config.githubOrg}/${githubRepoName}`;
+    nia.indexRepoAsync(niaRepoId);
+
+    // Index dependency docs from scaffold's package.json
+    const pkgFile = plan.scaffold.find((f) => f.path === "package.json");
+    if (pkgFile) {
+      try {
+        const pkg = JSON.parse(pkgFile.content);
+        const deps = Object.keys(pkg.dependencies || {});
+        for (const dep of deps) {
+          nia.indexDocsAsync(`https://www.npmjs.com/package/${dep}`);
+        }
+        log.info(`Nia: indexing repo ${niaRepoId} + ${deps.length} dependency docs`);
+      } catch (err) {
+        log.warn(`Failed to parse package.json for Nia dep indexing: ${err}`);
+      }
+    }
+  }
+
   // Create project object
   const now = new Date();
+  const recruitingDuration = options?.recruitingDurationMs ?? Math.max(config.recruitingDurationMs, config.agentWaitMs);
+  const minAgents = options?.minAgents ?? config.minAgents;
+  const recruitingUntil = recruitingDuration > 0 ? new Date(now.getTime() + recruitingDuration) : null;
   const project: Project = {
     id: projectId,
     name: plan.projectId,
     description: projectIdea,
     createdAt: now,
-    readyAt: new Date(now.getTime() + config.agentWaitMs),
-    status: "active",
+    readyAt: new Date(now.getTime() + recruitingDuration),
+    recruitingUntil,
+    minAgents,
+    status: recruitingDuration > 0 ? "recruiting" : "active",
     githubRepoUrl,
     githubRepoName,
+    niaRepoId,
+    niaSourceIds,
   };
 
   // Store project in task board (for persistence)

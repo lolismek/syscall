@@ -6,9 +6,13 @@ export interface Project {
   description: string;
   createdAt: Date;
   readyAt: Date;
-  status: "planning" | "active" | "completed";
+  recruitingUntil: Date | null;
+  minAgents: number;
+  status: "planning" | "recruiting" | "active" | "completed";
   githubRepoUrl: string | null;
   githubRepoName: string | null;
+  niaRepoId?: string;
+  niaSourceIds?: string[];
 }
 
 export interface ProjectPlan {

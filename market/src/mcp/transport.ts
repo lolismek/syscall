@@ -118,7 +118,9 @@ export function createTransport(
 
   // --- POST /api/projects --- Create a new project
   app.post("/api/projects", jsonParser, async (req, res) => {
-    const { idea, model } = req.body as { idea?: string; model?: string };
+    const { idea, model, recruitingDurationSeconds, minAgents } = req.body as {
+      idea?: string; model?: string; recruitingDurationSeconds?: number; minAgents?: number;
+    };
     if (!idea || typeof idea !== "string") {
       res.status(400).json({ error: "Missing required field: idea (string)" });
       return;
@@ -129,11 +131,17 @@ export function createTransport(
     }
 
     try {
-      const ctx = await createProject(idea, registry, githubClient, config.workspacePath);
+      const ctx = await createProject(idea, registry, githubClient, config.workspacePath, {
+        recruitingDurationMs: recruitingDurationSeconds !== undefined ? recruitingDurationSeconds * 1000 : undefined,
+        minAgents,
+      });
       res.status(201).json({
         projectId: ctx.project.id,
         name: ctx.project.name,
         description: ctx.project.description,
+        status: ctx.project.status,
+        recruitingUntil: ctx.project.recruitingUntil,
+        minAgents: ctx.project.minAgents,
         githubUrl: ctx.project.githubRepoUrl,
         taskCount: ctx.taskBoard.getAllTasks().length,
       });
@@ -228,14 +236,24 @@ function buildProjectStatus(ctx: import("../state/project-registry.js").ProjectC
     failed: tasks.filter((t) => ["rejected", "failed"].includes(t.status)).length,
   };
 
+  const projectInfo: Record<string, unknown> = {
+    id: project.id,
+    name: project.name,
+    description: project.description,
+    status: project.status,
+    githubUrl: project.githubRepoUrl,
+  };
+
+  if (project.status === "recruiting" && project.recruitingUntil) {
+    const remainingMs = Math.max(0, new Date(project.recruitingUntil).getTime() - Date.now());
+    projectInfo.recruitingUntil = project.recruitingUntil;
+    projectInfo.recruitingRemainingSeconds = Math.ceil(remainingMs / 1000);
+    projectInfo.minAgents = project.minAgents;
+    projectInfo.connectedAgents = agents.length;
+  }
+
   return {
-    project: {
-      id: project.id,
-      name: project.name,
-      description: project.description,
-      status: project.status,
-      githubUrl: project.githubRepoUrl,
-    },
+    project: projectInfo,
     tasks: tasks.map((t) => ({
       id: t.id,
       title: t.spec.title,

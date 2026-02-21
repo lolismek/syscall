@@ -1,9 +1,18 @@
-export function buildPlanPrompt(projectIdea: string): string {
+export function buildPlanPrompt(projectIdea: string, documentationContext?: string): string {
+  const docsSection = documentationContext
+    ? `\n<documentation_context>
+Real documentation for technologies relevant to this project. Use this to write accurate interface contracts, correct API usage, and realistic task instructions:
+
+${documentationContext}
+</documentation_context>\n`
+    : "";
+
   return `A user wants to build the following project:
 
 <project_idea>
 ${projectIdea}
 </project_idea>
+${docsSection}
 
 Decompose this into a concrete implementation plan. Output ONLY valid JSON with this exact structure:
 

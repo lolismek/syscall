@@ -64,6 +64,16 @@ export class ProjectRegistry {
         // Rehydrate project
         const project: Project = savedState.project;
         project.createdAt = new Date(project.createdAt);
+        if (project.recruitingUntil) {
+          project.recruitingUntil = new Date(project.recruitingUntil);
+        }
+        // Backfill for projects created before recruiting feature
+        if (project.minAgents === undefined) {
+          project.minAgents = 1;
+        }
+        if ((project as any).recruitingUntil === undefined) {
+          project.recruitingUntil = null;
+        }
 
         // Rehydrate task board
         const taskBoard = new TaskBoard();

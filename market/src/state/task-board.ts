@@ -115,6 +115,14 @@ export class TaskBoard extends EventEmitter {
     if (data.project) {
       data.project.createdAt = new Date(data.project.createdAt);
       data.project.readyAt = data.project.readyAt ? new Date(data.project.readyAt) : data.project.createdAt;
+      if (data.project.recruitingUntil) {
+        data.project.recruitingUntil = new Date(data.project.recruitingUntil);
+      } else if ((data.project as any).recruitingUntil === undefined) {
+        data.project.recruitingUntil = null;
+      }
+      if (data.project.minAgents === undefined) {
+        data.project.minAgents = 1;
+      }
       this.project = data.project;
     }
     if (data.projectShortId) {

@@ -27,8 +27,16 @@ const HTML = `<!DOCTYPE html>
   .project-desc { color: var(--muted); margin-top: 2px; font-size: 12px; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
   .badge-planning { background: #d2992233; color: var(--yellow); }
+  .badge-recruiting { background: #bc8cff33; color: var(--purple); }
   .badge-active { background: #3fb95033; color: var(--green); }
   .badge-completed { background: #58a6ff33; color: var(--accent); }
+
+  /* Recruiting banner */
+  .recruiting-banner { background: #bc8cff15; border: 1px solid #bc8cff44; border-radius: 8px; padding: 14px 20px; margin-bottom: 16px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .recruiting-banner .timer { font-size: 28px; font-weight: 700; color: var(--purple); font-variant-numeric: tabular-nums; min-width: 60px; }
+  .recruiting-banner .info { flex: 1; }
+  .recruiting-banner .info-title { font-weight: 600; color: var(--purple); margin-bottom: 2px; }
+  .recruiting-banner .info-sub { font-size: 12px; color: var(--muted); }
   .badge-pending { background: #8b949e33; color: var(--muted); }
   .badge-assigned, .badge-in_progress, .badge-submitted { background: #d2992233; color: var(--yellow); }
   .badge-accepted { background: #3fb95033; color: var(--green); }
@@ -111,7 +119,12 @@ const HTML = `<!DOCTYPE html>
   .project-card-counts { font-size: 11px; color: var(--muted); }
 
   /* Create form */
-  .create-form { display: flex; gap: 8px; margin-bottom: 16px; }
+  .create-form { display: flex; gap: 8px; margin-bottom: 8px; }
+  .create-options { display: flex; gap: 16px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+  .create-option { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .create-option label { white-space: nowrap; }
+  .create-option input[type="number"] { width: 70px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 12px; outline: none; }
+  .create-option input[type="number"]:focus { border-color: var(--accent); }
   .create-input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; font-family: inherit; font-size: 13px; outline: none; }
   .create-input:focus { border-color: var(--accent); }
   .create-input::placeholder { color: var(--muted); }
@@ -153,6 +166,16 @@ const HTML = `<!DOCTYPE html>
         <input class="create-input" id="createInput" type="text" placeholder="Describe your project idea... e.g. Build a todo REST API with auth" />
         <button class="btn" id="createBtn" onclick="createProject()">Create Project</button>
       </div>
+      <div class="create-options">
+        <div class="create-option">
+          <label for="recruitingTime">Recruiting timer (sec)</label>
+          <input type="number" id="recruitingTime" value="120" min="0" step="30" />
+        </div>
+        <div class="create-option">
+          <label for="minAgents">Min agents for early start</label>
+          <input type="number" id="minAgents" value="1" min="1" step="1" />
+        </div>
+      </div>
       <div class="create-status" id="createStatus"></div>
     </div>
 
@@ -181,6 +204,14 @@ const HTML = `<!DOCTYPE html>
       <div class="connection">
         <span class="dot dot-err" id="connDot"></span>
         <span id="connLabel">disconnected</span>
+      </div>
+    </div>
+
+    <div class="recruiting-banner" id="recruitingBanner" style="display:none">
+      <div class="timer" id="recruitingTimer">--:--</div>
+      <div class="info">
+        <div class="info-title">Recruiting Phase</div>
+        <div class="info-sub" id="recruitingInfo">Waiting for agents to join...</div>
       </div>
     </div>
 
@@ -268,6 +299,9 @@ async function createProject() {
   const idea = input.value.trim();
   if (!idea) { status.textContent = "Please enter a project idea."; status.className = "create-status error"; return; }
 
+  const recruitingDurationSeconds = parseInt(document.getElementById("recruitingTime").value, 10) || 0;
+  const minAgents = parseInt(document.getElementById("minAgents").value, 10) || 1;
+
   btn.disabled = true;
   status.textContent = "Creating project... (this calls the LLM to plan, may take 30-60s)";
   status.className = "create-status";
@@ -276,7 +310,7 @@ async function createProject() {
     const res = await fetch(API_BASE + "/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ idea }),
+      body: JSON.stringify({ idea, recruitingDurationSeconds, minAgents }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -525,6 +559,21 @@ function renderDetail(data) {
     } else {
       ghLink.style.display = "none";
     }
+  }
+
+  // Recruiting banner
+  const rb = document.getElementById("recruitingBanner");
+  if (data.project.status === "recruiting" && data.project.recruitingUntil) {
+    rb.style.display = "flex";
+    const remainSec = data.project.recruitingRemainingSeconds || 0;
+    const mm = String(Math.floor(remainSec / 60)).padStart(2, "0");
+    const ss = String(remainSec % 60).padStart(2, "0");
+    document.getElementById("recruitingTimer").textContent = mm + ":" + ss;
+    const agents = data.project.connectedAgents || 0;
+    const minA = data.project.minAgents || 1;
+    document.getElementById("recruitingInfo").textContent = agents + " agent(s) connected — need " + minA + " to start early. Timer expires in " + mm + ":" + ss + ".";
+  } else {
+    rb.style.display = "none";
   }
 
   const p = data.progress;

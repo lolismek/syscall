@@ -4,9 +4,11 @@ import { buildValidationPrompt } from "./prompts/validate-submission.js";
 import { TaskBoard } from "../state/task-board.js";
 import { GitRepo } from "../git/repo.js";
 import { GitHubClient } from "../git/github.js";
-import { ProjectPlan, ScaffoldFile } from "../types/project.js";
+import { ProjectPlan, ScaffoldFile, Project } from "../types/project.js";
 import { TaskSpec } from "../types/task.js";
 import { createLogger } from "../utils/logger.js";
+import { config } from "../utils/config.js";
+import { NiaClient } from "../knowledge/nia-client.js";
 
 const log = createLogger("Actions");
 
@@ -47,7 +49,20 @@ export async function planProject(
 ): Promise<ProjectPlan> {
   log.info("Planning project...", { idea: projectIdea.slice(0, 100) });
 
-  const prompt = buildPlanPrompt(projectIdea);
+  // Enrich planning with Nia web search for documentation context
+  let documentationContext: string | undefined;
+  if (config.niaApiKey) {
+    try {
+      const nia = new NiaClient(config.niaApiKey);
+      log.info("Researching project technologies via Nia...");
+      documentationContext = await nia.webSearch(projectIdea);
+      log.info("Nia research complete, enriching planning prompt");
+    } catch (err) {
+      log.warn(`Nia web search failed (continuing without): ${err}`);
+    }
+  }
+
+  const prompt = buildPlanPrompt(projectIdea, documentationContext);
   const rawResult = await invokeOrchestrator(prompt);
 
   let plan: PlanResponse;
@@ -235,6 +250,13 @@ export async function validateSubmission(
     }
     taskBoard.updateTaskStatus(taskId, "accepted", validation.feedback);
     log.info(`Task ${taskId} ACCEPTED`);
+
+    // Fire-and-forget: re-index the project repo so later workers see merged code
+    const project = taskBoard.getProject();
+    if (project?.niaRepoId && config.niaApiKey) {
+      const nia = new NiaClient(config.niaApiKey);
+      nia.indexRepoAsync(project.niaRepoId);
+    }
   } else {
     taskBoard.updateTaskStatus(taskId, "rejected", validation.feedback);
     log.info(`Task ${taskId} REJECTED: ${validation.feedback}`);
