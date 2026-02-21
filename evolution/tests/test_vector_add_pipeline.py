@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from kernelswarm.pipeline import PipelineConfig, SingleWorkerPipeline
 from kernelswarm.plugins.vector_add import VectorAddConfig, VectorAddProblem
@@ -37,6 +38,26 @@ class VectorAddPipelineTests(unittest.TestCase):
             self.assertIsNotNone(summary.best_candidate_id)
             self.assertTrue(Path(summary.report_path).exists())
             self.assertTrue((workspace / "db" / "runs.sqlite").exists())
+
+    def test_nvcc_arch_resolution_prefers_explicit_arch(self) -> None:
+        problem = VectorAddProblem(VectorAddConfig(backend="nvcc"))
+        self.assertEqual(problem._resolve_nvcc_arch("sm_80"), "sm_80")
+
+    def test_nvcc_arch_resolution_detects_gpu_compute_cap(self) -> None:
+        problem = VectorAddProblem(VectorAddConfig(backend="nvcc"))
+        with (
+            mock.patch("kernelswarm.plugins.vector_add.shutil.which", return_value="/usr/bin/nvidia-smi"),
+            mock.patch.object(VectorAddProblem, "_capture_cmd", return_value="7.5"),
+        ):
+            self.assertEqual(problem._resolve_nvcc_arch("auto"), "sm_75")
+
+    def test_nvcc_arch_resolution_falls_back_when_detection_unavailable(self) -> None:
+        problem = VectorAddProblem(VectorAddConfig(backend="nvcc"))
+        with (
+            mock.patch("kernelswarm.plugins.vector_add.shutil.which", return_value=None),
+            mock.patch.object(VectorAddProblem, "_capture_cmd", return_value=None),
+        ):
+            self.assertEqual(problem._resolve_nvcc_arch("auto"), "sm_75")
 
 
 if __name__ == "__main__":

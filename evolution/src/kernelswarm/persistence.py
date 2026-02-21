@@ -144,6 +144,16 @@ class SQLiteStore:
         )
         self._conn.commit()
 
+    def run_exists(self, run_id: str) -> bool:
+        cursor = self._conn.execute(
+            """
+            SELECT 1 FROM runs WHERE run_id = ? LIMIT 1
+            """,
+            (run_id,),
+        )
+        row = cursor.fetchone()
+        return row is not None
+
     def save_candidate(self, candidate: Candidate, state: CandidateState) -> None:
         self._conn.execute(
             """
