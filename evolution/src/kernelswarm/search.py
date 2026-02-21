@@ -224,6 +224,7 @@ class SwarmSearchRunner:
                     remote_client=remote_client,
                     problem_config=problem_config,
                     island_quick_frontier=island_quick_frontier,
+                    prompt_context=prompt_context,
                 )
 
             start_time = time.time()
@@ -299,6 +300,7 @@ class SwarmSearchRunner:
                             remote_client=chosen_remote,
                             problem_config=problem_config,
                             judge_input=proposal,
+                            prompt_context=prompt_context,
                         )
                         quick_eval_futures[eval_future] = (iteration, island_id, candidate)
 
@@ -453,6 +455,7 @@ class SwarmSearchRunner:
                                 quick_fitness=quick_fitness,
                                 quick_median_us=self._benchmark_median_us(eval_result.quick_benchmark),
                                 island_top_fitness=island_top_fitness,
+                                prompt_context=prompt_context,
                             )
                             swarm.usage.add(full_gate.usage)
                             eval_result.full_judge = full_gate
@@ -616,6 +619,7 @@ class SwarmSearchRunner:
         remote_client: RemoteEvaluatorClient | None,
         problem_config: dict[str, Any],
         island_quick_frontier: dict[str, float | None],
+        prompt_context: dict[str, Any] | None = None,
     ) -> None:
         ctx = ProblemRunContext(run_id=state.run_id, seed=self.config.seed)
         baseline = problem.baseline(ctx)
@@ -647,6 +651,7 @@ class SwarmSearchRunner:
                 remote_client=remote_client,
                 problem_config=problem_config,
                 judge_input=dummy_proposal,
+                prompt_context=prompt_context,
             )
             state.quick_scored += 1
             island = islands[idx % len(islands)]
@@ -696,6 +701,7 @@ class SwarmSearchRunner:
         remote_client: RemoteEvaluatorClient | None,
         problem_config: dict[str, Any],
         judge_input: GeneratorDecision,
+        prompt_context: dict[str, Any] | None = None,
     ) -> CandidateEvaluation:
         run_id = candidate.run_id
         cid = candidate.candidate_id
@@ -718,7 +724,10 @@ class SwarmSearchRunner:
         )
 
         static_local = problem.static_check(candidate)
-        judge = swarm.next_judge().review(candidate=candidate, static=static_local, stage="triage")
+        judge = swarm.next_judge().review(
+            candidate=candidate, static=static_local, stage="triage",
+            prompt_context=prompt_context,
+        )
         swarm.usage.add(judge.usage)
         artifacts.write_json(
             artifacts.candidate_dir(run_id, cid, "agent") / "judge_decision.json",

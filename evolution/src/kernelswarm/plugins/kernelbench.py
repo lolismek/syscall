@@ -202,28 +202,26 @@ class KernelBenchProblem(OptimizationProblem):
 
     def _load_ref_source_from_disk(self) -> tuple[str, str]:
         """Load reference source directly from KernelBench repo files (no imports needed)."""
-        repo = self.config.repo_path
-        if not repo:
-            return "", f"level_{self.config.level}/problem_{self.config.problem_id}"
+        # Try configured repo_path first, then common local paths.
+        candidates = []
+        if self.config.repo_path:
+            candidates.append(Path(self.config.repo_path).expanduser())
+        candidates.append(Path.home() / "KernelBench")
 
-        repo_path = Path(repo).expanduser()
-        # KernelBench stores problems at: KernelBench/level{N}/{problem_id}_{name}.py
-        level_dir = repo_path / "KernelBench" / f"level{self.config.level}"
-        if not level_dir.is_dir():
-            return "", f"level_{self.config.level}/problem_{self.config.problem_id}"
-
-        # Find the file matching this problem ID.
-        prefix = f"{self.config.problem_id}_"
-        for py_file in sorted(level_dir.iterdir()):
-            if py_file.name.startswith(prefix) and py_file.suffix == ".py":
-                try:
-                    source = py_file.read_text(encoding="utf-8")
-                    name = py_file.stem
-                    _log.info("Loaded reference source from disk: %s", py_file)
-                    return source, name
-                except Exception as exc:
-                    _log.warning("Failed to read reference source from %s: %s", py_file, exc)
-                    break
+        for repo_path in candidates:
+            level_dir = repo_path / "KernelBench" / f"level{self.config.level}"
+            if not level_dir.is_dir():
+                continue
+            prefix = f"{self.config.problem_id}_"
+            for py_file in sorted(level_dir.iterdir()):
+                if py_file.name.startswith(prefix) and py_file.suffix == ".py":
+                    try:
+                        source = py_file.read_text(encoding="utf-8")
+                        name = py_file.stem
+                        _log.info("Loaded reference source from disk: %s", py_file)
+                        return source, name
+                    except Exception as exc:
+                        _log.warning("Failed to read reference source from %s: %s", py_file, exc)
 
         return "", f"level_{self.config.level}/problem_{self.config.problem_id}"
 
@@ -280,6 +278,24 @@ class KernelBenchProblem(OptimizationProblem):
             reasons.append("level must be >= 1")
         if self.config.problem_id <= 0:
             reasons.append("problem_id must be >= 1")
+
+        # Reject candidates that drop learnable parameters.
+        # If the candidate doesn't delegate to Model (torch.compile wrapper etc.)
+        # then it must define its own nn.Parameter or use a parameterized module.
+        _delegates_to_model = bool(re.search(r'\bModel\s*\(', source))
+        _has_parameters = bool(
+            re.search(r'nn\.Parameter\b', source)
+            or re.search(r'nn\.LayerNorm\b', source)
+            or re.search(r'nn\.Linear\b', source)
+            or re.search(r'nn\.Conv', source)
+            or re.search(r'nn\.BatchNorm', source)
+            or re.search(r'nn\.GroupNorm', source)
+        )
+        if not _delegates_to_model and not _has_parameters:
+            reasons.append(
+                "candidate must have learnable parameters (nn.Parameter, nn.LayerNorm, etc.) "
+                "or delegate to Model — dropping parameters is not allowed"
+            )
 
         if self.config.static_check_enabled:
             for pattern, message in _SAFETY_PATTERNS:
@@ -708,6 +724,25 @@ class KernelBenchProblem(OptimizationProblem):
             self._static_runtime = cached
             return cached
 
+    @staticmethod
+    def _detect_backend(candidate_source: str, configured_backend: str) -> str:
+        """Auto-detect the correct KernelBench backend for the candidate.
+
+        Triton kernels use ``@triton.jit`` which internally calls
+        ``inspect.getsource()`` — that requires the code to live in a real
+        ``.py`` file.  KernelBench already handles this when
+        ``backend="triton"`` (writes to a tempfile and imports the module),
+        but the swarm may be configured with ``backend="cuda"``.  Detect
+        Triton usage and override so the tempfile path is taken.
+        """
+        if configured_backend.lower() in ("triton", "tilelang", "cute"):
+            return configured_backend  # already correct
+        # Heuristic: if the source imports triton or uses the @triton.jit decorator,
+        # it needs the tempfile-based loader.
+        if re.search(r'\bimport\s+triton\b', candidate_source) or re.search(r'@triton\.jit\b', candidate_source):
+            return "triton"
+        return configured_backend
+
     def _evaluate_kernel(
         self,
         *,
@@ -721,6 +756,13 @@ class KernelBenchProblem(OptimizationProblem):
         num_correct_trials: int,
         num_perf_trials: int,
     ) -> _KernelBenchEvalResult:
+        eval_backend = self._detect_backend(candidate_source, self.config.backend)
+        if eval_backend != self.config.backend:
+            _log.info(
+                "Auto-detected backend %r for candidate (configured: %r)",
+                eval_backend,
+                self.config.backend,
+            )
         raw = kb_eval.eval_kernel_against_ref(
             original_model_src=ref_source,
             custom_model_src=candidate_source,
@@ -731,7 +773,7 @@ class KernelBenchProblem(OptimizationProblem):
             verbose=self.config.verbose,
             build_dir=str(build_dir),
             device=device,
-            backend=self.config.backend,
+            backend=eval_backend,
             precision=precision_dtype,
             check_for_excessive_speedup=False,
         )

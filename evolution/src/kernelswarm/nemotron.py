@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import random
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 from urllib import request
 
+logger = logging.getLogger(__name__)
 
-DEFAULT_NEMOTRON_MODEL = "nvidia/Nemotron-3-Nano-30B-A3B"
+
+DEFAULT_NEMOTRON_MODEL = "deepseek-ai/DeepSeek-V3.2"
 DEFAULT_NVIDIA_API_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_DEEPINFRA_API_BASE_URL = "https://api.deepinfra.com/v1/openai"
 DEFAULT_PROVIDER = "deepinfra"
@@ -73,7 +77,7 @@ class NemotronConfig:
     base_url: str | None = None
     api_key: str | None = None
     api_key_env: str | None = None
-    timeout_s: float = 60.0
+    timeout_s: float = 180.0
     max_concurrent_requests: int = 32
 
     def resolved_base_url(self) -> str:
@@ -159,13 +163,32 @@ class NemotronClient:
             },
         )
 
+        max_retries = 3
         start = time.perf_counter()
-        try:
-            with self._semaphore:
-                with request.urlopen(req, timeout=self.config.timeout_s) as resp:
-                    raw = resp.read().decode("utf-8")
-        except Exception as exc:  # pragma: no cover - network path
-            raise NemotronError(f"nemotron request failed: {exc}") from exc
+        for attempt in range(max_retries):
+            try:
+                # Rebuild request on retry (urllib consumes the body)
+                if attempt > 0:
+                    req = request.Request(
+                        f"{self.base_url}/chat/completions",
+                        method="POST",
+                        data=json.dumps(body).encode("utf-8"),
+                        headers={
+                            "Authorization": f"Bearer {self.config.resolved_api_key()}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+                with self._semaphore:
+                    with request.urlopen(req, timeout=self.config.timeout_s) as resp:
+                        raw = resp.read().decode("utf-8")
+                break
+            except Exception as exc:  # pragma: no cover - network path
+                if attempt < max_retries - 1:
+                    delay = (attempt + 1) * 2 + random.uniform(0, 2)
+                    logger.warning("LLM request failed (attempt %d/%d): %s — retrying in %.1fs", attempt + 1, max_retries, exc, delay)
+                    time.sleep(delay)
+                else:
+                    raise NemotronError(f"nemotron request failed: {exc}") from exc
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
         try:
@@ -174,6 +197,15 @@ class NemotronClient:
             raise NemotronError(f"nemotron response is not valid JSON: {exc}") from exc
 
         content = self._extract_content(data)
+        if not content.strip():
+            finish = data.get("choices", [{}])[0].get("finish_reason", "unknown")
+            logger.error(
+                "LLM returned empty content: finish_reason=%s, model=%s, raw_keys=%s, raw_snippet=%.500s",
+                finish,
+                data.get("model", "?"),
+                list(data.keys()),
+                raw[:500],
+            )
         payload = self._extract_json_payload(content)
         usage_data = data.get("usage", {})
         usage = NemotronUsage(
@@ -212,24 +244,44 @@ class NemotronClient:
         content = content.strip()
         if not content:
             raise NemotronError("nemotron content is empty")
+        # Try full content first.
         try:
             payload = json.loads(content)
+            if isinstance(payload, dict):
+                return payload
         except json.JSONDecodeError:
-            start = content.find("{")
-            end = content.rfind("}")
-            if start < 0 or end < start:
-                raise NemotronError("nemotron content does not contain a JSON object")
-            payload = json.loads(content[start : end + 1])
-        if not isinstance(payload, dict):
-            raise NemotronError("nemotron payload is not an object")
-        return payload
+            pass
+        # Try raw_decode to grab the first valid JSON object.
+        start = content.find("{")
+        if start < 0:
+            raise NemotronError("nemotron content does not contain a JSON object")
+        decoder = json.JSONDecoder()
+        try:
+            payload, _ = decoder.raw_decode(content, start)
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            pass
+        # Last resort: try progressively shorter slices from the last '}'.
+        idx = len(content)
+        while True:
+            idx = content.rfind("}", start, idx)
+            if idx < 0:
+                break
+            try:
+                payload = json.loads(content[start : idx + 1])
+                if isinstance(payload, dict):
+                    return payload
+            except json.JSONDecodeError:
+                pass
+        raise NemotronError("nemotron content does not contain a valid JSON object")
 
     def _supports_chat_template_kwargs(self) -> bool:
         provider = self.config.provider.strip().lower()
         if provider == "nvidia":
             return True
         if provider == "deepinfra":
-            return False
+            return True
         return "integrate.api.nvidia.com" in self.base_url
 
     def _supports_json_response_format(self) -> bool:
@@ -237,5 +289,5 @@ class NemotronClient:
         if provider == "nvidia":
             return True
         if provider == "deepinfra":
-            return False
+            return True
         return "integrate.api.nvidia.com" in self.base_url

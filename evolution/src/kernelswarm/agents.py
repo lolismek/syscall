@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import random
 import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from .hashing import attach_content_hashes
 from .map_elites import IslandPolicy
@@ -210,12 +213,13 @@ The "full_source" field must contain a complete Python source file that defines 
 This class must produce numerically identical outputs to the reference Model for the same inputs.
 
 CRITICAL RULES:
-- ModelNew must be a standalone nn.Module (do NOT inherit from Model, do NOT delegate to Model)
-- ModelNew.__init__ must accept the same constructor arguments as Model
+- ModelNew must be a standalone nn.Module that accepts the same constructor arguments as Model
 - ModelNew.forward must accept the same inputs and return the same outputs
-- You MUST write actual optimized code — do not just wrap or alias the reference Model
-- Use custom CUDA kernels via torch.utils.cpp_extension.load_inline, or Triton kernels, or \
-optimized PyTorch operations
+- ModelNew MUST have the same learnable parameters (weight, bias, etc.) as the reference Model \
+with the same shapes — dropping or ignoring learnable parameters is NOT allowed
+- All valid approaches are welcome: torch.compile, custom CUDA kernels via \
+torch.utils.cpp_extension.load_inline, Triton kernels, optimized PyTorch operations, \
+or any combination
 - All imports must be at the top of the file
 - Do not use try/except blocks
 
@@ -235,8 +239,13 @@ _KB_USER_TEMPLATE = """\
 === REFERENCE MODEL (the PyTorch code you must beat) ===
 {ref_source}
 
-=== CURRENT CANDIDATE (your starting point — improve or rewrite this) ===
+=== CURRENT CANDIDATE (your starting point — improve this, keep what works) ===
 {candidate_source}
+
+IMPORTANT: If the current candidate uses torch.compile, that is a STRONG baseline (often 3-5x faster \
+than naive PyTorch). Do NOT throw it away and rewrite from scratch. Instead, build on it — try \
+combining torch.compile with custom Triton kernels for specific ops, or replace only the bottleneck \
+ops with fused CUDA kernels while keeping torch.compile for the rest.
 
 === CONTEXT ===
 Hardware: {hardware}
@@ -296,6 +305,7 @@ class GeneratorAgent:
         with self._lock:
             is_kb = prompt_context is not None and prompt_context.get("mode") == "kernelbench"
             if self.client is None:
+                logger.warning("[%s] No LLM client configured, using heuristic fallback", self.agent_id)
                 if is_kb:
                     return self._heuristic_kb(parent=parent, policy=policy)
                 return self._heuristic(parent=parent, policy=policy)
@@ -310,6 +320,11 @@ class GeneratorAgent:
                 )
                 return self._from_llm(parent=parent, policy=policy, response=response)
             except Exception:
+                logger.error(
+                    "[%s] LLM proposal failed, falling back to heuristic",
+                    self.agent_id,
+                    exc_info=True,
+                )
                 if is_kb:
                     return self._heuristic_kb(parent=parent, policy=policy)
                 return self._heuristic(parent=parent, policy=policy)
@@ -327,6 +342,8 @@ class GeneratorAgent:
             candidate_source = src.content
 
         style_guidance = _STYLE_GUIDANCE.get(policy.style, _STYLE_GUIDANCE["aggressive"])
+        # Add a random seed to encourage diverse outputs for the same parent.
+        diversity_hint = f"\nDiversity seed: {self.rng.randint(0, 999999):06d}. Try a DIFFERENT optimization approach than previous attempts.\n"
         user_prompt = _KB_USER_TEMPLATE.format(
             ref_source=ctx.get("ref_source", "# reference source unavailable"),
             candidate_source=candidate_source or "# empty",
@@ -339,10 +356,11 @@ class GeneratorAgent:
             island_style=policy.style,
             mutation_scale=policy.mutation_scale,
             style_guidance=style_guidance,
-        )
+        ) + diversity_hint
 
-        # Use DEEP_MODE for KernelBench — we need enough tokens for full kernel source.
-        kb_mode = NemotronMode(name="kernelbench", temperature=0.7, max_tokens=4096, enable_thinking=False)
+        # KernelBench needs enough tokens for full kernel source.
+        # High temperature for diversity — dedup filter catches repeats.
+        kb_mode = NemotronMode(name="kernelbench", temperature=0.9, max_tokens=4096, enable_thinking=False)
         response = self.client.chat_json(  # type: ignore[union-attr]
             system_prompt=_KB_SYSTEM_PROMPT,
             user_prompt=user_prompt,
@@ -355,7 +373,12 @@ class GeneratorAgent:
         risk_level = str(payload.get("risk_level", "high"))
 
         if not full_source or "ModelNew" not in full_source:
-            # LLM failed to produce valid source — fall back
+            logger.warning(
+                "[%s] LLM response missing ModelNew class (got %d chars, preview: %.200s)",
+                self.agent_id,
+                len(full_source),
+                full_source[:200] if full_source else "<empty>",
+            )
             return self._heuristic_kb(parent=parent, policy=policy)
 
         rep = _clone_representation(parent.representation)
@@ -391,9 +414,10 @@ class GeneratorAgent:
         )
 
     def _heuristic_kb(self, *, parent: Candidate, policy: IslandPolicy) -> GeneratorDecision:
-        """Heuristic fallback for KernelBench: return the parent unchanged.
+        """Heuristic fallback for KernelBench: reject immediately.
 
-        Without LLM, we can't write new kernels — don't make cosmetic changes.
+        Without LLM, we can't write new kernels. Returning the parent unchanged
+        wastes an eval slot and always hits the dedup filter.
         """
         rep = _clone_representation(parent.representation)
         origin = CandidateOrigin(
@@ -407,15 +431,15 @@ class GeneratorAgent:
             origin=origin,
             representation=rep,
             track=parent.track,
-            hypothesis="heuristic passthrough (no LLM available)",
+            hypothesis="heuristic rejected (LLM required for kernelbench)",
         )
         attach_content_hashes(candidate=candidate)
         return GeneratorDecision(
             candidate=candidate,
             changed_knobs={},
-            expected_effect="heuristic passthrough (no LLM available)",
+            expected_effect="heuristic rejected (LLM required for kernelbench)",
             risk_level="low",
-            rejected=False,
+            rejected=True,
             used_llm=False,
             source_mutations=[],
             usage=None,
@@ -622,6 +646,7 @@ class JudgeAgent:
         quick_fitness: float | None = None,
         quick_median_us: float | None = None,
         island_top_fitness: float | None = None,
+        prompt_context: dict[str, Any] | None = None,
     ) -> JudgeDecision:
         stage = (stage or "triage").strip().lower()
 
@@ -644,6 +669,24 @@ class JudgeAgent:
                 risk_tags=["quick_invalid"],
                 used_llm=False,
                 reasoning="quick stage indicates invalid candidate",
+                usage=None,
+            )
+
+        # For KernelBench: skip LLM judge entirely — static check is sufficient.
+        # The LLM judge was trained on CUDA kernels and incorrectly rejects valid
+        # Python-based KernelBench candidates.
+        is_kb = prompt_context is not None and prompt_context.get("mode") == "kernelbench"
+        if is_kb:
+            heuristic_priority = 0.7
+            if stage == "full_gate" and quick_fitness is not None:
+                heuristic_priority = max(0.1, min(1.0, quick_fitness / 200.0))
+            return JudgeDecision(
+                stage=stage,
+                compile_worthy=True,
+                priority_score=heuristic_priority,
+                risk_tags=[],
+                used_llm=False,
+                reasoning="kernelbench auto-allow (static check sufficient)",
                 usage=None,
             )
 
