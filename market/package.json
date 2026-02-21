@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx src/index.ts",
-    "worker": "tsx test-worker/index.ts"
+    "worker": "tsx test-worker/index.ts",
+    "dashboard": "tsx src/dashboard.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^1.0.0",

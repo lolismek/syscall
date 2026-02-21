@@ -108,7 +108,7 @@ async function main() {
 
   // Start MCP server
   const mcpServerFactory = createMcpServerFactory(taskBoard, projectStore, gitRepo);
-  const app = createTransport(mcpServerFactory);
+  const app = createTransport(mcpServerFactory, taskBoard, projectStore);
 
   app.listen(config.port, () => {
     log.info(`MCP server listening on http://localhost:${config.port}/mcp`);

@@ -1,11 +1,17 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServerFactory } from "./server.js";
+import type { TaskBoard } from "../state/task-board.js";
+import type { ProjectStore } from "../state/project-store.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("Transport");
 
-export function createTransport(serverFactory: McpServerFactory): express.Express {
+export function createTransport(
+  serverFactory: McpServerFactory,
+  taskBoard: TaskBoard,
+  projectStore: ProjectStore,
+): express.Express {
   const app = express();
   // IMPORTANT: Do NOT use express.json() globally — the MCP StreamableHTTP
   // transport needs the raw body to parse JSON-RPC itself. Only parse JSON
@@ -71,6 +77,53 @@ export function createTransport(serverFactory: McpServerFactory): express.Expres
     } else {
       res.status(400).json({ error: "No session found" });
     }
+  });
+
+  // CORS for /api routes
+  app.use("/api", (_req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (_req.method === "OPTIONS") { res.sendStatus(204); return; }
+    next();
+  });
+
+  app.get("/api/status", (_req, res) => {
+    const project = projectStore.getProject();
+    const tasks = taskBoard.getAllTasks();
+    const agents = taskBoard.getAllAgents();
+
+    const progress = {
+      total: tasks.length,
+      accepted: tasks.filter((t) => t.status === "accepted").length,
+      inProgress: tasks.filter((t) => ["assigned", "in_progress", "submitted"].includes(t.status)).length,
+      pending: tasks.filter((t) => t.status === "pending").length,
+      failed: tasks.filter((t) => ["rejected", "failed"].includes(t.status)).length,
+    };
+
+    res.json({
+      project: project
+        ? { id: project.id, name: project.name, description: project.description, status: project.status }
+        : null,
+      tasks: tasks.map((t) => ({
+        id: t.id,
+        title: t.spec.title,
+        status: t.status,
+        assignedTo: t.assignedTo,
+        branch: t.branch,
+        dependencies: t.spec.dependencies,
+        filePaths: t.spec.filePaths,
+      })),
+      agents: agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        capabilities: a.capabilities,
+        joinedAt: a.joinedAt,
+        currentTaskId: a.currentTaskId,
+      })),
+      progress,
+      timestamp: new Date().toISOString(),
+    });
   });
 
   app.get("/health", jsonParser, (_req, res) => {
