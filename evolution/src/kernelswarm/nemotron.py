@@ -277,12 +277,17 @@ class NemotronClient:
         raise NemotronError("nemotron content does not contain a valid JSON object")
 
     def _supports_chat_template_kwargs(self) -> bool:
-        provider = self.config.provider.strip().lower()
-        if provider == "nvidia":
-            return True
-        if provider == "deepinfra":
-            return True
-        return "integrate.api.nvidia.com" in self.base_url
+        # chat_template_kwargs (enable_thinking) is only supported by reasoning
+        # models like Nemotron-3-Nano.  Sending it to models that don't
+        # understand the parameter (e.g. DeepSeek V3.2) causes DeepInfra to
+        # drop the connection with RemoteDisconnected.
+        model_lower = self.config.model.lower()
+        if "nemotron" in model_lower or "deepseek-r1" in model_lower:
+            provider = self.config.provider.strip().lower()
+            if provider in ("nvidia", "deepinfra"):
+                return True
+            return "integrate.api.nvidia.com" in self.base_url
+        return False
 
     def _supports_json_response_format(self) -> bool:
         provider = self.config.provider.strip().lower()
