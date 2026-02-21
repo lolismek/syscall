@@ -78,19 +78,57 @@ export async function planProject(
     log.warn(`Scaffold commit failed (may be empty): ${err}`);
   }
 
-  // Add tasks to the board
-  const tasks: TaskSpec[] = plan.tasks.map((t) => ({
-    title: t.title,
-    description: t.description,
-    instructions: t.instructions,
-    filePaths: t.filePaths,
-    dependencies: t.dependencies,
-    interfaceContract: t.interfaceContract,
-  }));
-
-  for (const taskSpec of tasks) {
-    taskBoard.addTask(projectId, taskSpec);
+  // Add tasks to the board, remapping LLM-generated dependency IDs to real IDs.
+  // The LLM is told to use "task-001" style IDs but may produce variants like
+  // "task-1", "task_001", "task_1", or even just "1".
+  const createdTasks: import("../types/task.js").Task[] = [];
+  for (const t of plan.tasks) {
+    const task = taskBoard.addTask(projectId, {
+      title: t.title,
+      description: t.description,
+      instructions: t.instructions,
+      filePaths: t.filePaths,
+      dependencies: [],  // placeholder — remapped below
+      interfaceContract: t.interfaceContract,
+    });
+    createdTasks.push(task);
   }
+
+  // Build a mapping from any LLM-style reference for task N → real ID.
+  // Task at index 0 is task #1, index 1 is task #2, etc.
+  const idMap = new Map<string, string>();
+  for (let i = 0; i < createdTasks.length; i++) {
+    const realId = createdTasks[i].id;
+    const n = i + 1;
+    // Register every plausible variant the LLM might use
+    const padded = String(n).padStart(3, "0");
+    for (const prefix of ["task-", "task_", "task", ""]) {
+      idMap.set(`${prefix}${n}`, realId);
+      idMap.set(`${prefix}${padded}`, realId);
+    }
+  }
+
+  function resolveDepId(raw: string): string | null {
+    const key = raw.trim().toLowerCase();
+    return idMap.get(key) ?? null;
+  }
+
+  // Now patch dependencies on each created task
+  for (let i = 0; i < plan.tasks.length; i++) {
+    const rawDeps = plan.tasks[i].dependencies;
+    const resolved: string[] = [];
+    for (const raw of rawDeps) {
+      const realId = resolveDepId(raw);
+      if (realId) {
+        resolved.push(realId);
+      } else {
+        log.warn(`Task ${createdTasks[i].id}: unknown dependency "${raw}" — skipping`);
+      }
+    }
+    createdTasks[i].spec.dependencies = resolved;
+  }
+
+  const tasks: TaskSpec[] = createdTasks.map((t) => t.spec);
 
   log.info(`Project planned: ${plan.projectName}, ${tasks.length} tasks created`);
 

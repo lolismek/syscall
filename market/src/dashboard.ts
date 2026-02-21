@@ -79,16 +79,22 @@ const HTML = `<!DOCTYPE html>
   .ratio { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
 
   /* Dependency graph */
-  .dep-graph { position: relative; overflow-x: auto; min-height: 120px; }
+  .dep-graph { position: relative; overflow-x: auto; min-height: 120px; padding: 8px 0; }
   .dep-graph svg { display: block; }
   .dep-node { cursor: default; }
-  .dep-node rect { rx: 6; ry: 6; stroke-width: 1.5; }
-  .dep-node text { font-family: inherit; font-size: 11px; fill: var(--text); }
+  .dep-node rect { rx: 8; ry: 8; stroke-width: 2; }
+  .dep-node text { font-family: inherit; fill: var(--text); }
   .dep-node .node-id { font-size: 10px; fill: var(--muted); }
-  .dep-edge { fill: none; stroke-width: 1.5; marker-end: url(#arrow); }
+  .dep-node .node-title { font-size: 11px; font-weight: 600; }
+  .dep-node .node-status { font-size: 10px; }
+  .dep-edge { fill: none; stroke-width: 2; }
+  .dep-edge-broken { stroke-dasharray: 4 3; }
   .dep-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 11px; color: var(--muted); }
   .dep-legend-item { display: flex; align-items: center; gap: 5px; }
   .dep-legend-swatch { width: 12px; height: 12px; border-radius: 3px; }
+  .badge-blocked { background: #f8514922; color: var(--red); }
+  .badge-available { background: #3fb95022; color: var(--green); }
+  .broken-dep { color: var(--red); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -98,7 +104,7 @@ const HTML = `<!DOCTYPE html>
       <div class="project-name" id="projectName">Connecting...</div>
       <div class="project-desc" id="projectDesc"></div>
     </div>
-    <span class="badge badge-planning" id="projectBadge">—</span>
+    <span class="badge badge-planning" id="projectBadge">\u2014</span>
     <div class="progress-bar-wrap">
       <div class="progress-label"><span>Progress</span><span id="progressPct">0%</span></div>
       <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
@@ -124,6 +130,7 @@ const HTML = `<!DOCTYPE html>
       <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#d29922"></div>In Progress</div>
       <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#3fb950"></div>Accepted</div>
       <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#f85149"></div>Rejected / Failed</div>
+      <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#f85149;border:1px dashed #f85149"></div>Broken Dep</div>
     </div>
   </div>
 
@@ -167,9 +174,37 @@ function statusColor(s) {
   return { fill: "#8b949e22", stroke: "#8b949e" };
 }
 
+// Mirrors the backend getAvailableTasks logic so the dashboard shows the truth
+function computeTaskAvailability(tasks) {
+  const taskMap = {};
+  tasks.forEach(t => taskMap[t.id] = t);
+  const result = {}; // taskId -> { available: bool, blocked: bool, brokenDeps: string[] }
+  tasks.forEach(t => {
+    if (t.status !== "pending") {
+      result[t.id] = { available: false, blocked: false, brokenDeps: [] };
+      return;
+    }
+    const brokenDeps = [];
+    let allMet = true;
+    t.dependencies.forEach(depId => {
+      const dep = taskMap[depId];
+      if (!dep) { brokenDeps.push(depId); allMet = false; }
+      else if (dep.status !== "accepted") { allMet = false; }
+    });
+    result[t.id] = {
+      available: allMet && brokenDeps.length === 0,
+      blocked: !allMet || brokenDeps.length > 0,
+      brokenDeps,
+    };
+  });
+  return result;
+}
+
 function renderDepGraph(tasks) {
   const container = document.getElementById("depGraph");
   if (!tasks || tasks.length === 0) { container.innerHTML = '<div class="empty-state">No tasks yet</div>'; return; }
+
+  const availability = computeTaskAvailability(tasks);
 
   // Build adjacency & compute layers via topological sort (Kahn's)
   const taskMap = {};
@@ -180,6 +215,7 @@ function renderDepGraph(tasks) {
   tasks.forEach(t => {
     t.dependencies.forEach(dep => {
       if (taskMap[dep]) { children[dep].push(t.id); inDeg[t.id]++; }
+      else { inDeg[t.id]++; }
     });
   });
 
@@ -196,57 +232,121 @@ function renderDepGraph(tasks) {
     }
     queue = next;
   }
-  // Catch any nodes missed (cycles)
   const placed = new Set(layers.flat());
   const missed = tasks.filter(t => !placed.has(t.id)).map(t => t.id);
   if (missed.length) layers.push(missed);
 
-  // Layout params
-  const nodeW = 160, nodeH = 50, padX = 40, padY = 30;
-  const maxPerLayer = Math.max(...layers.map(l => l.length));
-  const svgW = layers.length * (nodeW + padX) + padX;
-  const svgH = maxPerLayer * (nodeH + padY) + padY;
+  // Track which layer each node is in
+  const nodeLayer = {};
+  layers.forEach((layer, li) => layer.forEach(id => { nodeLayer[id] = li; }));
 
-  // Compute positions
+  // Left-to-right layout — layers are columns
+  const nodeW = 220, nodeH = 66, gapX = 80, gapY = 24;
+  const marginX = 40, marginY = 30;
+  const maxPerLayer = Math.max(...layers.map(l => l.length));
+  const svgW = layers.length * (nodeW + gapX) - gapX + marginX * 2;
+  const svgH = maxPerLayer * (nodeH + gapY) - gapY + marginY * 2;
+
+  // Compute positions — layers go left to right, nodes centered vertically
   const pos = {};
   layers.forEach((layer, li) => {
-    const x = padX + li * (nodeW + padX);
-    const totalH = layer.length * nodeH + (layer.length - 1) * padY;
+    const x = marginX + li * (nodeW + gapX);
+    const totalH = layer.length * nodeH + (layer.length - 1) * gapY;
     const startY = (svgH - totalH) / 2;
     layer.forEach((id, ni) => {
-      pos[id] = { x, y: startY + ni * (nodeH + padY) };
+      pos[id] = { x, y: startY + ni * (nodeH + gapY) };
     });
   });
 
   // Build SVG
   let svg = '<svg width="' + svgW + '" height="' + svgH + '" xmlns="http://www.w3.org/2000/svg">';
-  svg += '<defs><marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#8b949e"/></marker></defs>';
+  svg += '<defs>';
+  svg += '<marker id="arrow" viewBox="0 0 10 8" refX="10" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L8,4 L0,7" fill="none" stroke="#484f58" stroke-width="1.5"/></marker>';
+  svg += '<marker id="arrow-green" viewBox="0 0 10 8" refX="10" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L8,4 L0,7" fill="none" stroke="#3fb950" stroke-width="1.5"/></marker>';
+  svg += '<marker id="arrow-red" viewBox="0 0 10 8" refX="10" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L8,4 L0,7" fill="none" stroke="#f85149" stroke-width="1.5"/></marker>';
+  svg += '</defs>';
 
-  // Edges
+  // Edges — from dependency (left) to dependent (right)
   tasks.forEach(t => {
     t.dependencies.forEach(dep => {
-      if (!pos[dep] || !pos[t.id]) return;
-      const from = pos[dep], to = pos[t.id];
-      const x1 = from.x + nodeW, y1 = from.y + nodeH / 2;
-      const x2 = to.x, y2 = to.y + nodeH / 2;
-      const cx1 = x1 + (x2 - x1) * 0.5, cx2 = x2 - (x2 - x1) * 0.5;
-      // Color edge by dependency status
+      if (!pos[t.id]) return;
       const depTask = taskMap[dep];
-      const edgeColor = depTask && depTask.status === "accepted" ? "#3fb95088" : "#8b949e55";
-      svg += '<path class="dep-edge" d="M' + x1 + ',' + y1 + ' C' + cx1 + ',' + y1 + ' ' + cx2 + ',' + y2 + ' ' + x2 + ',' + y2 + '" stroke="' + edgeColor + '"/>';
+      if (depTask && pos[dep]) {
+        const from = pos[dep], to = pos[t.id];
+        const x1 = from.x + nodeW, y1 = from.y + nodeH / 2;
+        const x2 = to.x, y2 = to.y + nodeH / 2;
+        const accepted = depTask.status === "accepted";
+        const edgeColor = accepted ? "#3fb950" : "#484f58";
+        const markerRef = accepted ? "url(#arrow-green)" : "url(#arrow)";
+        const opacity = accepted ? "0.6" : "0.4";
+
+        const layerSpan = nodeLayer[t.id] - nodeLayer[dep];
+
+        if (layerSpan <= 1) {
+          // Adjacent layers — simple bezier, no nodes to cross
+          const midX = (x1 + x2) / 2;
+          svg += '<path class="dep-edge" d="M' + x1 + ',' + y1 + ' C' + midX + ',' + y1 + ' ' + midX + ',' + y2 + ' ' + x2 + ',' + y2 + '" stroke="' + edgeColor + '" opacity="' + opacity + '" marker-end="' + markerRef + '"/>';
+        } else {
+          // Multi-layer span — route around intermediate nodes
+          const goUp = y2 <= y1;
+          const edgeY = goUp ? Math.min(marginY / 2, Math.min(y1, y2) - 20) : Math.max(svgH - marginY / 2, Math.max(y1 + nodeH, y2 + nodeH) + 20);
+          const outX = x1 + gapX * 0.3;
+          const inX = x2 - gapX * 0.3;
+          svg += '<path class="dep-edge" d="'
+            + 'M' + x1 + ',' + y1
+            + ' L' + outX + ',' + y1
+            + ' Q' + (outX + 10) + ',' + y1 + ' ' + (outX + 10) + ',' + (y1 + (edgeY - y1) * 0.3)
+            + ' L' + (outX + 10) + ',' + edgeY
+            + ' L' + (inX - 10) + ',' + edgeY
+            + ' L' + (inX - 10) + ',' + (y2 + (edgeY - y2) * 0.3)
+            + ' Q' + (inX - 10) + ',' + y2 + ' ' + inX + ',' + y2
+            + ' L' + x2 + ',' + y2
+            + '" stroke="' + edgeColor + '" opacity="' + opacity + '" marker-end="' + markerRef + '"/>';
+        }
+      } else {
+        // Broken dep
+        const to = pos[t.id];
+        const x2 = to.x, y2 = to.y + nodeH / 2;
+        svg += '<text x="' + (x2 - 8) + '" y="' + (y2 + 4) + '" font-size="9" fill="#f85149" text-anchor="end">' + esc(dep) + '?</text>';
+      }
     });
   });
 
   // Nodes
   tasks.forEach(t => {
     if (!pos[t.id]) return;
-    const p = pos[t.id], c = statusColor(t.status);
-    const label = t.title.length > 20 ? t.title.slice(0, 19) + "\\u2026" : t.title;
+    const p = pos[t.id];
+    const a = availability[t.id];
+    const c = statusColor(t.status);
+    const label = t.title;
     const agent = t.assignedTo ? t.assignedTo.split("-").slice(1, 2).join("") : "";
+
+    let stroke = c.stroke;
+    if (t.status === "pending" && a && a.brokenDeps.length > 0) stroke = "#f85149";
+
     svg += '<g class="dep-node" transform="translate(' + p.x + ',' + p.y + ')">';
-    svg += '<rect width="' + nodeW + '" height="' + nodeH + '" fill="' + c.fill + '" stroke="' + c.stroke + '"/>';
-    svg += '<text class="node-id" x="8" y="16">' + esc(t.id) + (agent ? " \\u2022 " + esc(agent) : "") + '</text>';
-    svg += '<text x="8" y="34">' + esc(label) + '</text>';
+    svg += '<rect width="' + nodeW + '" height="' + nodeH + '" fill="' + c.fill + '" stroke="' + stroke + '"' + (a && a.brokenDeps.length > 0 ? ' stroke-dasharray="4 2"' : '') + '/>';
+
+    // Line 1: task ID + agent
+    svg += '<text class="node-id" x="10" y="16">' + esc(t.id) + (agent ? "  \\u2192 " + esc(agent) : "") + '</text>';
+
+    // Line 2: title — clip to node width
+    svg += '<text class="node-title" x="10" y="34" clip-path="url(#nodeClip-' + t.id + ')">' + esc(label) + '</text>';
+    svg += '<clipPath id="nodeClip-' + t.id + '"><rect x="0" y="20" width="' + (nodeW - 12) + '" height="20"/></clipPath>';
+
+    // Line 3: status line
+    let statusText = t.status;
+    let statusFill = c.stroke;
+    if (t.status === "pending" && a) {
+      if (a.brokenDeps.length > 0) { statusText = "\\u26A0 broken deps"; statusFill = "#f85149"; }
+      else if (a.blocked) { statusText = "\\u23F3 waiting on deps"; statusFill = "#8b949e"; }
+      else { statusText = "\\u25CF ready"; statusFill = "#3fb950"; }
+    } else if (t.status === "accepted") { statusText = "\\u2713 accepted"; }
+    else if (t.status === "rejected") { statusText = "\\u2717 rejected"; }
+    else if (t.status === "submitted") { statusText = "\\u2022 validating..."; }
+    else if (t.status === "in_progress" || t.status === "assigned") { statusText = "\\u2022 " + t.status.replace("_", " "); }
+    svg += '<text class="node-status" x="10" y="54" fill="' + statusFill + '">' + esc(statusText) + '</text>';
+
     svg += '</g>';
   });
 
@@ -290,25 +390,63 @@ function render(data) {
     }).join("");
   }
 
-  // Task board grouped
+  // Compute availability to show accurate status
+  const availability = computeTaskAvailability(data.tasks);
+  const taskMap = {};
+  data.tasks.forEach(t => taskMap[t.id] = t);
+
+  // Task board grouped — split Pending into Available / Blocked
+  const STATUS_GROUP_EX = {
+    assigned: "In Progress", in_progress: "In Progress", submitted: "In Progress",
+    pending: "Pending", accepted: "Completed", rejected: "Failed", failed: "Failed",
+  };
+  const GROUP_ORDER_EX = ["In Progress", "Available", "Blocked", "Completed", "Failed"];
   const groups = {};
   for (const t of data.tasks) {
-    const g = STATUS_GROUP[t.status] || "Pending";
+    let g = STATUS_GROUP_EX[t.status] || "Pending";
+    if (g === "Pending") {
+      const a = availability[t.id];
+      g = a && a.available ? "Available" : "Blocked";
+    }
     (groups[g] = groups[g] || []).push(t);
   }
   const tb = document.getElementById("taskBoard");
   let html = "";
-  for (const g of GROUP_ORDER) {
+  for (const g of GROUP_ORDER_EX) {
     const items = groups[g];
     if (!items || items.length === 0) continue;
     html += '<div class="task-group"><div class="task-group-label">' + esc(g) + ' (' + items.length + ')</div>';
     for (const t of items) {
-      const deps = t.dependencies.length ? '<div class="task-detail">deps: ' + t.dependencies.map(esc).join(", ") + '</div>' : '';
+      const a = availability[t.id];
+      // Show deps with status coloring
+      let depsHtml = "";
+      if (t.dependencies.length) {
+        const depParts = t.dependencies.map(depId => {
+          const dep = taskMap[depId];
+          if (!dep) return '<span class="broken-dep">' + esc(depId) + ' (unknown!)</span>';
+          if (dep.status === "accepted") return '<span style="color:var(--green)">' + esc(depId) + ' \\u2713</span>';
+          return '<span style="color:var(--muted)">' + esc(depId) + ' (' + esc(dep.status) + ')</span>';
+        });
+        depsHtml = '<div class="task-detail">deps: ' + depParts.join(", ") + '</div>';
+      }
+      // Show broken deps warning
+      let warning = "";
+      if (a && a.brokenDeps.length > 0) {
+        warning = '<div class="task-detail broken-dep">\\u26A0 broken dependency IDs: ' + a.brokenDeps.map(esc).join(", ") + '</div>';
+      }
       const agent = t.assignedTo ? '<div class="task-detail">agent: ' + esc(t.assignedTo) + '</div>' : '';
       const branch = t.branch ? '<div class="task-detail">branch: ' + esc(t.branch) + '</div>' : '';
+      // Show refined badge for pending tasks
+      let badgeClass = "badge-" + t.status;
+      let badgeText = t.status;
+      if (t.status === "pending" && a) {
+        if (a.brokenDeps.length > 0) { badgeClass = "badge-blocked"; badgeText = "broken deps"; }
+        else if (a.blocked) { badgeClass = "badge-blocked"; badgeText = "blocked"; }
+        else { badgeClass = "badge-available"; badgeText = "available"; }
+      }
       html += '<div class="task-row"><span class="task-id">' + esc(t.id) + '</span>'
-        + '<span class="badge badge-' + t.status + '">' + esc(t.status) + '</span>'
-        + '<div class="task-title">' + esc(t.title) + deps + agent + branch + '</div></div>';
+        + '<span class="badge ' + badgeClass + '">' + esc(badgeText) + '</span>'
+        + '<div class="task-title">' + esc(t.title) + depsHtml + warning + agent + branch + '</div></div>';
     }
     html += '</div>';
   }

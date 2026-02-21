@@ -30,7 +30,7 @@ function createMcpServer(
   // --- Tool: join_project ---
   server.tool(
     "join_project",
-    "Register as a worker agent and get the project summary",
+    "Register as a worker agent and get the project summary. Clone the repoUrl yourself, then call get_my_task.",
     {
       agent_name: z.string().describe("Your name / identifier"),
       capabilities: z.array(z.string()).describe("What you can do, e.g. ['typescript', 'react']"),
@@ -52,14 +52,14 @@ function createMcpServer(
         },
         totalTasks: tasks.length,
         availableTasks: taskBoard.getAvailableTasks().length,
+        repoUrl: gitRepo.getRepoPath(),
         rules: [
+          "Clone repoUrl into your own working directory",
           "Call get_my_task to receive your assignment",
           "Call report_status when you start working",
-          "Call check_updates before submitting",
           "Work on your assigned branch only",
-          "Call submit_result when done — do NOT merge to main",
+          "Push your branch, then call submit_result — do NOT merge to main",
         ],
-        workspace: gitRepo.getRepoPath(),
       };
       log.info(`Agent joined: ${agent.name} (${agent.id})`);
       return { content: [{ type: "text" as const, text: JSON.stringify(summary, null, 2) }] };
@@ -69,7 +69,7 @@ function createMcpServer(
   // --- Tool: get_my_task ---
   server.tool(
     "get_my_task",
-    "Get the next available task assigned to you",
+    "Get the next available task assigned to you. Fetch origin and checkout the returned branch in your clone.",
     {
       agent_id: z.string().describe("Your agent ID from join_project"),
     },
@@ -94,17 +94,38 @@ function createMcpServer(
 
       const available = taskBoard.getAvailableTasks();
       if (available.length === 0) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ message: "No tasks available right now. Try again later." }) }] };
+        const allTasks = taskBoard.getAllTasks();
+        const terminal = ["accepted", "failed"];
+        const allDone = allTasks.length > 0 && allTasks.every(t => terminal.includes(t.status));
+        if (allDone) {
+          const accepted = allTasks.filter(t => t.status === "accepted").length;
+          return { content: [{ type: "text" as const, text: JSON.stringify({
+            message: "All tasks are complete. The project is done.",
+            done: true,
+            accepted,
+            total: allTasks.length,
+          }) }] };
+        }
+        const pending = allTasks.filter(t => t.status === "pending").length;
+        const inProgress = allTasks.filter(t => ["assigned", "in_progress", "submitted"].includes(t.status)).length;
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          message: "No tasks available right now, but the project is NOT done. There are tasks blocked on dependencies being completed by other agents. Please wait 15-30 seconds and call get_my_task again.",
+          done: false,
+          pendingTasks: pending,
+          inProgressTasks: inProgress,
+        }) }] };
       }
 
       const task = available[0];
       const branch = `agent/${agent_id}/${task.id}`;
       const assigned = taskBoard.assignTask(task.id, agent_id, branch);
       if (!assigned) {
-        return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Failed to assign task" }) }] };
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          error: "Failed to assign task — likely a race condition. Call get_my_task again to get another task.",
+        }) }] };
       }
 
-      // Create git branch
+      // Create branch in the repo — worker will fetch + checkout themselves
       try {
         await gitRepo.createBranch(branch);
       } catch (err) {
@@ -115,7 +136,7 @@ function createMcpServer(
       return {
         content: [{ type: "text" as const, text: JSON.stringify({
           task: formatTaskForAgent(assigned),
-          workspace: gitRepo.getRepoPath(),
+          instructions: "In your clone: git fetch origin && git checkout -B " + branch + " origin/" + branch,
         }, null, 2) }],
       };
     }
@@ -170,7 +191,7 @@ function createMcpServer(
   // --- Tool: submit_result ---
   server.tool(
     "submit_result",
-    "Submit your branch for review — the orchestrator will validate async",
+    "Submit your branch for review — push your branch first, then call this. The orchestrator will validate async.",
     {
       agent_id: z.string().describe("Your agent ID"),
       task_id: z.string().describe("The task you're submitting"),
@@ -184,17 +205,15 @@ function createMcpServer(
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: "No branch assigned" }) }] };
       }
 
-      // Capture diff BEFORE any merge — use merge-base so it's always correct
+      // Worker has pushed their branch — diff against it in our repo
       try {
-        const diff = await gitRepo.getDiffMergeBase(task.branch);
+        const diff = await gitRepo.getDiffMergeBase(task.branch, task.spec.filePaths);
         taskBoard.setSubmissionDiff(task_id, diff);
       } catch (err) {
         log.warn(`Could not get diff for ${task.branch}: ${err}`);
       }
 
-      // Clear stale validation feedback from previous rounds
       taskBoard.clearValidationFeedback(task_id);
-
       taskBoard.updateTaskStatus(task_id, "submitted");
       log.info(`Task ${task_id} submitted by ${agent_id}`);
 
