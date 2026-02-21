@@ -1078,6 +1078,11 @@ class KernelBenchProblem(OptimizationProblem):
     def _seed_sources() -> list[str]:
         return [
             # Seed 0 (baseline): trivial wrapper — establishes reference fitness.
+            # We intentionally do NOT seed with torch.compile variants. When compile
+            # seeds dominate the archive at ~4.7x, the LLM is forced to write custom
+            # Triton to beat them and fails 90%+ of the time.  Starting from the raw
+            # reference lets the LLM discover torch.compile on its own as an easy win
+            # AND attempt simpler custom kernels against a lower bar.
             (
                 "import torch\n"
                 "import torch.nn as nn\n\n"
@@ -1085,42 +1090,6 @@ class KernelBenchProblem(OptimizationProblem):
                 "    def __init__(self, *init_inputs):\n"
                 "        super().__init__()\n"
                 "        self._impl = Model(*init_inputs)\n\n"
-                "    def forward(self, *inputs):\n"
-                "        return self._impl(*inputs)\n"
-            ),
-            # Seed 1: torch.compile eager optimization.
-            (
-                "import torch\n"
-                "import torch.nn as nn\n\n"
-                "class ModelNew(nn.Module):\n"
-                "    def __init__(self, *init_inputs):\n"
-                "        super().__init__()\n"
-                "        impl = Model(*init_inputs)\n"
-                "        self._impl = torch.compile(impl)\n\n"
-                "    def forward(self, *inputs):\n"
-                "        return self._impl(*inputs)\n"
-            ),
-            # Seed 2: torch.compile with reduce-overhead mode.
-            (
-                "import torch\n"
-                "import torch.nn as nn\n\n"
-                "class ModelNew(nn.Module):\n"
-                "    def __init__(self, *init_inputs):\n"
-                "        super().__init__()\n"
-                "        impl = Model(*init_inputs)\n"
-                "        self._impl = torch.compile(impl, mode='reduce-overhead')\n\n"
-                "    def forward(self, *inputs):\n"
-                "        return self._impl(*inputs)\n"
-            ),
-            # Seed 3: torch.compile with max-autotune mode.
-            (
-                "import torch\n"
-                "import torch.nn as nn\n\n"
-                "class ModelNew(nn.Module):\n"
-                "    def __init__(self, *init_inputs):\n"
-                "        super().__init__()\n"
-                "        impl = Model(*init_inputs)\n"
-                "        self._impl = torch.compile(impl, mode='max-autotune')\n\n"
                 "    def forward(self, *inputs):\n"
                 "        return self._impl(*inputs)\n"
             ),
