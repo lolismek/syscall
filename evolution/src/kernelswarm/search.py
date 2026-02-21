@@ -1504,7 +1504,8 @@ class SwarmSearchRunner:
             api_key_env=self.config.nemotron_api_key_env,
             max_concurrent_requests=self.config.nemotron_max_concurrent_requests,
         )
-        # Validate key availability up front.
+        # Validate model and key availability up front.
+        config.resolved_model()
         config.resolved_api_key()
         return NemotronClient(config)
 

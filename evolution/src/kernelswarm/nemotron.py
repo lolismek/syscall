@@ -13,7 +13,7 @@ from urllib import request
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_NEMOTRON_MODEL = "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+DEFAULT_NEMOTRON_MODEL = os.environ.get("KERNELSWARM_NEMOTRON_MODEL", "")
 DEFAULT_NVIDIA_API_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_DEEPINFRA_API_BASE_URL = "https://api.deepinfra.com/v1/openai"
 DEFAULT_PROVIDER = "deepinfra"
@@ -89,6 +89,13 @@ class NemotronConfig:
         if self.api_key_env and self.api_key_env.strip():
             return self.api_key_env.strip()
         return default_api_key_env(self.provider)
+
+    def resolved_model(self) -> str:
+        if not self.model or not self.model.strip():
+            raise NemotronError(
+                "Model undefined; set KERNELSWARM_NEMOTRON_MODEL in .env or provide --nemotron-model."
+            )
+        return self.model.strip()
 
     def resolved_api_key(self) -> str:
         if self.api_key:
