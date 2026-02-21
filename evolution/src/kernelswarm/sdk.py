@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from .models import (
     BenchmarkResult,
@@ -60,4 +60,13 @@ class OptimizationProblem(Protocol):
         build: BuildExecution,
         benchmark: BenchmarkResult,
     ) -> Descriptor:
+        ...
+
+    def generator_prompt_context(self) -> dict[str, Any]:
+        """Return problem-specific context for the LLM generator agent.
+
+        Keys may include: ref_source, problem_description, hardware,
+        framework_instructions, optimization_hints, etc.
+        Default implementations should return an empty dict.
+        """
         ...

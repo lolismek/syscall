@@ -390,6 +390,11 @@ class VectorAddProblem(OptimizationProblem):
         reg_bin = 0 if regs < 32 else 1 if regs < 48 else 2 if regs < 64 else 3
         smem_bin = 0 if smem == 0 else 1 if smem < 16_384 else 2 if smem < 48_000 else 3
         occ_bin = 0 if occupancy < 0.25 else 1 if occupancy < 0.5 else 2 if occupancy < 0.75 else 3
+        block_x = int(candidate.representation.launch.block[0]) if candidate.representation.launch.block else 256
+        launch_block_bin = max(0, min(7, int((max(32, min(1024, block_x)) - 32) / 128)))
+        source = candidate.representation.files[0].content if candidate.representation.files else ""
+        source_ops_score = sum(source.count(token) for token in ("for", "if", "__global__", "threadIdx", "blockIdx"))
+        source_ops_bin = max(0, min(7, source_ops_score))
 
         return Descriptor(
             run_id=candidate.run_id,
@@ -399,6 +404,8 @@ class VectorAddProblem(OptimizationProblem):
                 "reg_pressure_bin": reg_bin,
                 "smem_bin": smem_bin,
                 "occupancy_bin": occ_bin,
+                "launch_block_bin": launch_block_bin,
+                "source_ops_bin": source_ops_bin,
                 "unroll": int(candidate.representation.params.get("unroll", 0)),
                 "vec_width": int(candidate.representation.params.get("vec_width", 0)),
                 "stage_full": 1 if benchmark.stage is BenchmarkStage.FULL else 0,

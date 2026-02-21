@@ -53,6 +53,34 @@ class NemotronTests(unittest.TestCase):
         self.assertEqual(result.usage.total_tokens, 15)
         self.assertEqual(result.usage.model, "nvidia/nemotron-3-nano-30b-a3b")
 
+    def test_deepinfra_payload_omits_nvidia_only_fields(self) -> None:
+        response = {
+            "model": "nvidia/Nemotron-3-Nano-30B-A3B",
+            "choices": [{"message": {"content": "{\"ok\": true}"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+        seen_body: dict[str, object] = {}
+
+        def _fake_urlopen(req, timeout=None):  # type: ignore[no-untyped-def]
+            del timeout
+            seen_body.update(json.loads(req.data.decode("utf-8")))  # type: ignore[arg-type]
+            return _FakeHTTPResponse(response)
+
+        with mock.patch("kernelswarm.nemotron.request.urlopen", side_effect=_fake_urlopen):
+            client = NemotronClient(
+                NemotronConfig(
+                    provider="deepinfra",
+                    api_key="test-key",
+                    base_url="https://api.deepinfra.com/v1/openai",
+                    model="nvidia/Nemotron-3-Nano-30B-A3B",
+                )
+            )
+            client.chat_json(system_prompt="s", user_prompt="u")
+
+        self.assertNotIn("response_format", seen_body)
+        self.assertNotIn("chat_template_kwargs", seen_body)
+
 
 if __name__ == "__main__":
     unittest.main()

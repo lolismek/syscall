@@ -8,6 +8,7 @@ from .models import (
     BuildResult,
     Candidate,
     Descriptor,
+    IterationMetric,
     ScoreRecord,
     ValidationResult,
 )
@@ -45,6 +46,7 @@ def attach_content_hashes(
     benchmark_result: BenchmarkResult | None = None,
     descriptor: Descriptor | None = None,
     score_record: ScoreRecord | None = None,
+    iteration_metric: IterationMetric | None = None,
 ) -> None:
     if candidate is not None:
         candidate.content_hash = candidate_content_hash(candidate)
@@ -101,5 +103,27 @@ def attach_content_hashes(
                 "stage": score_record.stage,
                 "scalar_fitness": score_record.scalar_fitness,
                 "raw_score": score_record.raw_score,
+            }
+        )
+    if iteration_metric is not None:
+        iteration_metric.content_hash = stable_object_hash(
+            {
+                "schema_version": iteration_metric.schema_version,
+                "run_id": iteration_metric.run_id,
+                "iteration": iteration_metric.iteration,
+                "island_id": iteration_metric.island_id,
+                "candidate_id": iteration_metric.candidate_id,
+                "quick_fitness": iteration_metric.quick_fitness,
+                "full_fitness": iteration_metric.full_fitness,
+                "quick_median_us": iteration_metric.quick_median_us,
+                "full_median_us": iteration_metric.full_median_us,
+                "island_top_fitness": iteration_metric.island_top_fitness,
+                "island_coverage_ratio": iteration_metric.island_coverage_ratio,
+                "island_occupied_bins": iteration_metric.island_occupied_bins,
+                "island_accepted_updates": iteration_metric.island_accepted_updates,
+                "global_best_candidate_id": iteration_metric.global_best_candidate_id,
+                "global_best_fitness": iteration_metric.global_best_fitness,
+                "total_tokens": iteration_metric.total_tokens,
+                "payload": iteration_metric.payload,
             }
         )

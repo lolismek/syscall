@@ -2,14 +2,41 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 from urllib import request
 
 
-DEFAULT_NEMOTRON_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
+DEFAULT_NEMOTRON_MODEL = "nvidia/Nemotron-3-Nano-30B-A3B"
 DEFAULT_NVIDIA_API_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_DEEPINFRA_API_BASE_URL = "https://api.deepinfra.com/v1/openai"
+DEFAULT_PROVIDER = "deepinfra"
+DEFAULT_NVIDIA_API_KEY_ENV = "NVIDIA_API_KEY"
+DEFAULT_DEEPINFRA_API_KEY_ENV = "DEEPINFRA_API_KEY"
+
+_SEMAPHORE_LOCK = threading.Lock()
+_SEMAPHORES: dict[tuple[str, str], threading.BoundedSemaphore] = {}
+_SEMAPHORE_LIMITS: dict[tuple[str, str], int] = {}
+
+
+def default_base_url(provider: str) -> str:
+    normalized = provider.strip().lower()
+    if normalized == "nvidia":
+        return DEFAULT_NVIDIA_API_BASE_URL
+    if normalized == "deepinfra":
+        return DEFAULT_DEEPINFRA_API_BASE_URL
+    return DEFAULT_DEEPINFRA_API_BASE_URL
+
+
+def default_api_key_env(provider: str) -> str:
+    normalized = provider.strip().lower()
+    if normalized == "nvidia":
+        return DEFAULT_NVIDIA_API_KEY_ENV
+    if normalized == "deepinfra":
+        return DEFAULT_DEEPINFRA_API_KEY_ENV
+    return DEFAULT_DEEPINFRA_API_KEY_ENV
 
 
 class NemotronError(RuntimeError):
@@ -41,19 +68,32 @@ DEEP_MODE = NemotronMode(
 
 @dataclass(slots=True)
 class NemotronConfig:
+    provider: str = DEFAULT_PROVIDER
     model: str = DEFAULT_NEMOTRON_MODEL
-    base_url: str = DEFAULT_NVIDIA_API_BASE_URL
+    base_url: str | None = None
     api_key: str | None = None
-    api_key_env: str = "NVIDIA_API_KEY"
+    api_key_env: str | None = None
     timeout_s: float = 60.0
+    max_concurrent_requests: int = 32
+
+    def resolved_base_url(self) -> str:
+        if self.base_url and self.base_url.strip():
+            return self.base_url.strip()
+        return default_base_url(self.provider)
+
+    def resolved_api_key_env(self) -> str:
+        if self.api_key_env and self.api_key_env.strip():
+            return self.api_key_env.strip()
+        return default_api_key_env(self.provider)
 
     def resolved_api_key(self) -> str:
         if self.api_key:
             return self.api_key
-        key = os.environ.get(self.api_key_env, "").strip()
+        key_env = self.resolved_api_key_env()
+        key = os.environ.get(key_env, "").strip()
         if not key:
             raise NemotronError(
-                f"Missing API key; set {self.api_key_env} or provide api_key in NemotronConfig."
+                f"Missing API key; set {key_env} or provide api_key in NemotronConfig."
             )
         return key
 
@@ -78,7 +118,16 @@ class NemotronResult:
 class NemotronClient:
     def __init__(self, config: NemotronConfig) -> None:
         self.config = config
-        self.base_url = config.base_url.rstrip("/")
+        self.base_url = config.resolved_base_url().rstrip("/")
+        limit = max(1, int(config.max_concurrent_requests))
+        key = (self.base_url, config.model)
+        with _SEMAPHORE_LOCK:
+            semaphore = _SEMAPHORES.get(key)
+            if semaphore is None or _SEMAPHORE_LIMITS.get(key) != limit:
+                semaphore = threading.BoundedSemaphore(limit)
+                _SEMAPHORES[key] = semaphore
+                _SEMAPHORE_LIMITS[key] = limit
+        self._semaphore = semaphore
 
     def chat_json(
         self,
@@ -95,9 +144,11 @@ class NemotronClient:
             ],
             "temperature": mode.temperature,
             "max_tokens": mode.max_tokens,
-            "response_format": {"type": "json_object"},
-            "chat_template_kwargs": {"enable_thinking": mode.enable_thinking},
         }
+        if self._supports_json_response_format():
+            body["response_format"] = {"type": "json_object"}
+        if self._supports_chat_template_kwargs():
+            body["chat_template_kwargs"] = {"enable_thinking": mode.enable_thinking}
         req = request.Request(
             f"{self.base_url}/chat/completions",
             method="POST",
@@ -110,8 +161,9 @@ class NemotronClient:
 
         start = time.perf_counter()
         try:
-            with request.urlopen(req, timeout=self.config.timeout_s) as resp:
-                raw = resp.read().decode("utf-8")
+            with self._semaphore:
+                with request.urlopen(req, timeout=self.config.timeout_s) as resp:
+                    raw = resp.read().decode("utf-8")
         except Exception as exc:  # pragma: no cover - network path
             raise NemotronError(f"nemotron request failed: {exc}") from exc
         elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -171,3 +223,19 @@ class NemotronClient:
         if not isinstance(payload, dict):
             raise NemotronError("nemotron payload is not an object")
         return payload
+
+    def _supports_chat_template_kwargs(self) -> bool:
+        provider = self.config.provider.strip().lower()
+        if provider == "nvidia":
+            return True
+        if provider == "deepinfra":
+            return False
+        return "integrate.api.nvidia.com" in self.base_url
+
+    def _supports_json_response_format(self) -> bool:
+        provider = self.config.provider.strip().lower()
+        if provider == "nvidia":
+            return True
+        if provider == "deepinfra":
+            return False
+        return "integrate.api.nvidia.com" in self.base_url

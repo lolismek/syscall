@@ -234,6 +234,29 @@ class ScoreRecord:
 
 
 @dataclass(slots=True)
+class IterationMetric:
+    run_id: str
+    iteration: int
+    island_id: str
+    candidate_id: str | None
+    quick_fitness: float | None
+    full_fitness: float | None
+    quick_median_us: float | None
+    full_median_us: float | None
+    island_top_fitness: float | None
+    island_coverage_ratio: float
+    island_occupied_bins: int
+    island_accepted_updates: int
+    global_best_candidate_id: str | None
+    global_best_fitness: float | None
+    total_tokens: int
+    payload: dict[str, Any] = field(default_factory=dict)
+    schema_version: str = "v1"
+    created_at: datetime = field(default_factory=utc_now)
+    content_hash: str = ""
+
+
+@dataclass(slots=True)
 class RunManifest:
     run_id: str
     problem_id: str

@@ -7,7 +7,12 @@ This repository contains the v1 implementation foundation for KernelSwarm:
 - sequential evaluation pipeline (`build -> validate -> benchmark -> score -> persist`)
 - SQLite persistence and artifact storage
 - reproducibility manifest capture
+- deep source-mutation DSL (`replace` / `insert_before` / `insert_after` / `append` / `prepend`)
+- two-stage judge flow (`triage` + `full_gate`)
 - example `vector_add` plugin
+- `reduction_v1` plugin
+- `stencil2d_v1` plugin
+- KernelBench plugin (`kernelbench_v1`)
 
 ## Layout
 
@@ -17,6 +22,9 @@ This repository contains the v1 implementation foundation for KernelSwarm:
 - `src/kernelswarm/persistence.py`: SQLite store
 - `src/kernelswarm/manifest.py`: environment + toolchain manifest
 - `src/kernelswarm/plugins/vector_add.py`: example problem plugin
+- `src/kernelswarm/plugins/reduction.py`: reduction plugin
+- `src/kernelswarm/plugins/stencil2d.py`: 2D stencil plugin
+- `src/kernelswarm/plugins/kernelbench.py`: KernelBench-backed problem plugin
 
 ## Quickstart
 
@@ -43,6 +51,19 @@ On fresh Ubuntu GPU instances, ensure both CUDA and host compilers are installed
 ```bash
 sudo apt-get update
 sudo apt-get install -y nvidia-cuda-toolkit gcc g++
+```
+
+Run a KernelBench problem:
+
+```bash
+uv run kernelswarm run-kernelbench \
+  --workspace .runs/kernelbench \
+  --repo-path /path/to/KernelBench \
+  --dataset-source local \
+  --level 1 \
+  --problem-id 23 \
+  --backend cuda \
+  --precision fp32
 ```
 
 ### Outputs
@@ -95,14 +116,40 @@ PYTHONPATH=src uv run python -m kernelswarm run-vector-add \
 Run iterative 4-island MAP-Elites search with 32 generator and 32 judge logical agents:
 
 ```bash
-export NVIDIA_API_KEY=...
+export DEEPINFRA_API_KEY=...
 uv run python -m kernelswarm run-swarm-search \
   --workspace .runs/search \
   --backend nvcc \
   --remote-eval-url http://127.0.0.1:8080 \
-  --nemotron-model nvidia/nemotron-3-nano-30b-a3b \
-  --nemotron-base-url https://integrate.api.nvidia.com/v1 \
+  --nemotron-provider deepinfra \
+  --nemotron-model nvidia/Nemotron-3-Nano-30B-A3B \
+  --nemotron-max-concurrent-requests 32 \
   --max-iterations 500
+```
+
+NVIDIA API remains supported:
+
+```bash
+export NVIDIA_API_KEY=...
+uv run python -m kernelswarm run-swarm-search \
+  --workspace .runs/search \
+  --nemotron-provider nvidia \
+  --nemotron-model nvidia/nemotron-3-nano-30b-a3b \
+  --nemotron-base-url https://integrate.api.nvidia.com/v1
+```
+
+KernelBench via swarm search:
+
+```bash
+uv run python -m kernelswarm run-swarm-search \
+  --workspace .runs/search-kb \
+  --problem-id kernelbench_v1 \
+  --backend cuda \
+  --kb-repo-path /path/to/KernelBench \
+  --kb-dataset-source local \
+  --kb-level 1 \
+  --kb-problem-id 23 \
+  --remote-eval-url http://127.0.0.1:8080
 ```
 
 Offline/local fallback (no LLM calls):
@@ -113,6 +160,12 @@ uv run python -m kernelswarm run-swarm-search \
   --llm-disabled \
   --backend python-sim \
   --max-iterations 100
+```
+
+Cross-problem suite runner (multiple problems x multiple seeds):
+
+```bash
+./scripts/run_multi_problem_suite.sh .runs/suite-v1
 ```
 
 Brev preflight/create from CLI:
@@ -133,3 +186,21 @@ uv run python -m kernelswarm run-swarm-search \
   --brev-create-if-missing \
   --remote-eval-url http://127.0.0.1:8080
 ```
+
+## Local Dashboard
+
+Serve a local dashboard (API + browser UI) for an existing run workspace:
+
+```bash
+uv run python -m kernelswarm serve-dashboard \
+  --workspace .runs/search \
+  --host 127.0.0.1 \
+  --port 8090
+```
+
+Open `http://127.0.0.1:8090` to watch:
+
+- global best fitness over iterations
+- global best median latency over iterations
+- per-island coverage state over time
+- live quick/full leaderboards and candidate state counts

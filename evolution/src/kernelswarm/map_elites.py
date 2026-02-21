@@ -10,12 +10,15 @@ from .models import Descriptor
 
 @dataclass(slots=True)
 class DescriptorAxes:
-    keys: tuple[str, ...] = ("reg_pressure_bin", "smem_bin", "occupancy_bin")
+    keys: tuple[str, ...] = ("reg_pressure_bin", "occupancy_bin", "launch_block_bin", "source_ops_bin")
     bins: dict[str, int] = field(
         default_factory=lambda: {
+            "occupancy_bin": 4,
+            "launch_block_bin": 8,
+            "source_ops_bin": 8,
+            # Keep compatibility for plugins still emitting these axes.
             "reg_pressure_bin": 4,
             "smem_bin": 4,
-            "occupancy_bin": 4,
         }
     )
 
@@ -155,7 +158,9 @@ class MapElitesArchive:
     def from_state(cls, payload: dict[str, Any]) -> "MapElitesArchive":
         axes_payload = payload.get("axes", {})
         axes = DescriptorAxes(
-            keys=tuple(axes_payload.get("keys", ("reg_pressure_bin", "smem_bin", "occupancy_bin"))),
+            keys=tuple(
+                axes_payload.get("keys", ("reg_pressure_bin", "occupancy_bin", "launch_block_bin", "source_ops_bin"))
+            ),
             bins=dict(axes_payload.get("bins", {})),
         )
         archive = cls(axes, epsilon=float(payload.get("epsilon", 1e-9)))

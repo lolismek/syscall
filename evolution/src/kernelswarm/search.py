@@ -5,6 +5,8 @@ import json
 import pickle
 import random
 import time
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,13 +37,14 @@ from .models import (
     Candidate,
     CandidateState,
     Descriptor,
+    IterationMetric,
     RunSummary,
     ScoreRecord,
     StaticCheckResult,
     ValidationResult,
     ValidationStatus,
 )
-from .nemotron import DEFAULT_NEMOTRON_MODEL, NemotronClient, NemotronConfig
+from .nemotron import DEFAULT_NEMOTRON_MODEL, DEFAULT_PROVIDER, NemotronClient, NemotronConfig
 from .persistence import SQLiteStore
 from .remote import (
     RemoteEvaluationError,
@@ -80,12 +83,22 @@ class SearchConfig:
     generator_agents: int = 32
     judge_agents: int = 32
     llm_enabled: bool = True
+    nemotron_provider: str = DEFAULT_PROVIDER
     nemotron_model: str = DEFAULT_NEMOTRON_MODEL
-    nemotron_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nemotron_base_url: str | None = None
     nemotron_api_key: str | None = None
-    nemotron_api_key_env: str = "NVIDIA_API_KEY"
+    nemotron_api_key_env: str | None = None
+    nemotron_max_concurrent_requests: int = 32
     remote_eval_url: str | None = None
     remote_eval_timeout_s: float = 120.0
+    proposal_workers: int = 32
+    quick_eval_workers: int = 12
+    full_eval_workers: int = 4
+    max_inflight_proposals: int = 96
+    max_inflight_quick_evals: int = 32
+    max_inflight_full_evals: int = 8
+    periodic_full_eval_every_quick: int = 40
+    force_first_full_per_island: bool = True
     brev: BrevSearchConfig = field(default_factory=BrevSearchConfig)
 
 
@@ -102,6 +115,7 @@ class CandidateEvaluation:
     build_execution: BuildExecution | None = None
     full_score: ScoreRecord | None = None
     full_benchmark: BenchmarkResult | None = None
+    full_judge: JudgeDecision | None = None
 
 
 @dataclass(slots=True)
@@ -125,11 +139,11 @@ class SwarmSearchRunner:
         self.workspace.mkdir(parents=True, exist_ok=True)
         store = SQLiteStore(self.db_path)
         artifacts = ArtifactStore(self.artifacts_root)
-        remote_client = (
-            RemoteEvaluatorClient(self.config.remote_eval_url, timeout_s=self.config.remote_eval_timeout_s)
-            if self.config.remote_eval_url
-            else None
-        )
+        remote_clients = [
+            RemoteEvaluatorClient(url, timeout_s=self.config.remote_eval_timeout_s)
+            for url in self._remote_eval_urls()
+        ]
+        remote_client = remote_clients[0] if remote_clients else None
         problem_config = self._problem_config(problem)
 
         brev_instance: dict[str, Any] | None = None
@@ -143,7 +157,9 @@ class SwarmSearchRunner:
             generator_count=self.config.generator_agents,
             judge_count=self.config.judge_agents,
         )
+        prompt_context = self._get_prompt_context(problem)
         islands = self._init_islands()
+        island_quick_frontier: dict[str, float | None] = {island.policy.island_id: None for island in islands}
         candidates_by_id: dict[str, Candidate] = {}
         seen_hashes: set[str] = set()
 
@@ -207,113 +223,326 @@ class SwarmSearchRunner:
                     seen_hashes=seen_hashes,
                     remote_client=remote_client,
                     problem_config=problem_config,
+                    island_quick_frontier=island_quick_frontier,
                 )
 
             start_time = time.time()
             last_checkpoint = time.time()
+            island_by_id = {island.policy.island_id: island for island in islands}
+            island_quick_counts = {island.policy.island_id: 0 for island in islands}
+            island_full_attempts = {island.policy.island_id: 0 for island in islands}
 
-            while state.iteration < self.config.max_iterations:
-                if (time.time() - start_time) >= max(1.0, self.config.max_minutes * 60.0):
-                    break
-                if self.config.token_budget > 0 and swarm.usage.total_tokens >= self.config.token_budget:
-                    break
+            proposal_workers = max(1, min(self.config.proposal_workers, self.config.generator_agents))
+            quick_eval_workers = max(1, self.config.quick_eval_workers)
+            full_eval_workers = max(1, self.config.full_eval_workers)
+            max_inflight_proposals = max(proposal_workers, self.config.max_inflight_proposals)
+            max_inflight_quick = max(quick_eval_workers, self.config.max_inflight_quick_evals)
+            max_inflight_full = max(full_eval_workers, self.config.max_inflight_full_evals)
 
-                island = islands[state.iteration % len(islands)]
-                parent = self._select_parent_candidate(island, candidates_by_id)
-                if parent is None:
-                    break
+            proposal_futures: dict[Future[GeneratorDecision], tuple[int, str]] = {}
+            quick_eval_futures: dict[Future[CandidateEvaluation], tuple[int, str, Candidate]] = {}
+            full_eval_futures: dict[
+                Future[tuple[ScoreRecord, BenchmarkResult] | None],
+                tuple[int, str, Candidate, CandidateEvaluation, RemoteEvaluatorClient | None],
+            ] = {}
+            pending_quick: deque[tuple[int, str, Candidate, GeneratorDecision, RemoteEvaluatorClient | None]] = deque()
+            pending_full: deque[tuple[int, str, Candidate, CandidateEvaluation, RemoteEvaluatorClient | None]] = deque()
+            next_iteration = int(state.iteration)
 
-                generator = swarm.next_generator()
-                proposal = generator.propose(parent=parent, policy=island.policy)
-                swarm.usage.add(proposal.usage)
+            with (
+                ThreadPoolExecutor(max_workers=proposal_workers, thread_name_prefix="ks-propose") as proposal_exec,
+                ThreadPoolExecutor(max_workers=quick_eval_workers, thread_name_prefix="ks-eval-quick") as quick_exec,
+                ThreadPoolExecutor(max_workers=full_eval_workers, thread_name_prefix="ks-eval-full") as full_exec,
+            ):
+                while True:
+                    budget_exhausted = self._submission_budget_exhausted(
+                        next_iteration=next_iteration,
+                        start_time=start_time,
+                        swarm=swarm,
+                    )
 
-                if proposal.rejected:
-                    state.iteration += 1
+                    while (
+                        not budget_exhausted
+                        and len(proposal_futures) + len(pending_quick) < max_inflight_proposals
+                    ):
+                        island = islands[next_iteration % len(islands)]
+                        parent = self._select_parent_candidate(island, candidates_by_id)
+                        if parent is None:
+                            budget_exhausted = True
+                            break
+
+                        generator = swarm.next_generator()
+                        iteration = next_iteration
+                        next_iteration += 1
+                        future = proposal_exec.submit(
+                            generator.propose,
+                            parent=parent,
+                            policy=island.policy,
+                            prompt_context=prompt_context,
+                        )
+                        proposal_futures[future] = (iteration, island.policy.island_id)
+                        budget_exhausted = self._submission_budget_exhausted(
+                            next_iteration=next_iteration,
+                            start_time=start_time,
+                            swarm=swarm,
+                        )
+
+                    while pending_quick and len(quick_eval_futures) < max_inflight_quick:
+                        iteration, island_id, candidate, proposal, chosen_remote = pending_quick.popleft()
+                        eval_future = quick_exec.submit(
+                            self._evaluate_candidate,
+                            problem=problem,
+                            store=store,
+                            artifacts=artifacts,
+                            candidate=candidate,
+                            swarm=swarm,
+                            remote_client=chosen_remote,
+                            problem_config=problem_config,
+                            judge_input=proposal,
+                        )
+                        quick_eval_futures[eval_future] = (iteration, island_id, candidate)
+
+                    while pending_full and len(full_eval_futures) < max_inflight_full:
+                        iteration, island_id, candidate, eval_result, chosen_remote = pending_full.popleft()
+                        full_future = full_exec.submit(
+                            self._evaluate_full,
+                            problem=problem,
+                            store=store,
+                            artifacts=artifacts,
+                            candidate=candidate,
+                            prior_eval=eval_result,
+                            remote_client=chosen_remote,
+                            problem_config=problem_config,
+                        )
+                        full_eval_futures[full_future] = (
+                            iteration,
+                            island_id,
+                            candidate,
+                            eval_result,
+                            chosen_remote,
+                        )
+
+                    completed_any = False
+
+                    for future in [f for f in proposal_futures if f.done()]:
+                        completed_any = True
+                        iteration, island_id = proposal_futures.pop(future)
+                        state.iteration = max(state.iteration, iteration + 1)
+                        island = island_by_id[island_id]
+                        try:
+                            proposal = future.result()
+                        except Exception as exc:
+                            self._record_iteration_metrics(
+                                store=store,
+                                state=state,
+                                iteration=iteration,
+                                islands=islands,
+                                swarm=swarm,
+                                active_island_id=island_id,
+                                candidate_id=None,
+                                quick_fitness=None,
+                                full_fitness=None,
+                                quick_median_us=None,
+                                full_median_us=None,
+                                reason=f"generator_error:{type(exc).__name__}",
+                            )
+                            continue
+
+                        swarm.usage.add(proposal.usage)
+                        if proposal.rejected:
+                            self._record_iteration_metrics(
+                                store=store,
+                                state=state,
+                                iteration=iteration,
+                                islands=islands,
+                                swarm=swarm,
+                                active_island_id=island_id,
+                                candidate_id=None,
+                                quick_fitness=None,
+                                full_fitness=None,
+                                quick_median_us=None,
+                                full_median_us=None,
+                                reason="generator_rejected",
+                            )
+                            continue
+
+                        candidate = proposal.candidate
+                        if candidate.content_hash in seen_hashes:
+                            self._record_iteration_metrics(
+                                store=store,
+                                state=state,
+                                iteration=iteration,
+                                islands=islands,
+                                swarm=swarm,
+                                active_island_id=island.policy.island_id,
+                                candidate_id=candidate.candidate_id,
+                                quick_fitness=None,
+                                full_fitness=None,
+                                quick_median_us=None,
+                                full_median_us=None,
+                                reason="duplicate_candidate",
+                            )
+                            continue
+                        seen_hashes.add(candidate.content_hash)
+                        candidates_by_id[candidate.candidate_id] = candidate
+                        pending_quick.append(
+                            (
+                                iteration,
+                                island.policy.island_id,
+                                candidate,
+                                proposal,
+                                self._select_remote_client(remote_clients, candidate),
+                            )
+                        )
+
+                    for future in [f for f in quick_eval_futures if f.done()]:
+                        completed_any = True
+                        iteration, island_id, candidate = quick_eval_futures.pop(future)
+                        state.iteration = max(state.iteration, iteration + 1)
+                        island = island_by_id[island_id]
+                        try:
+                            eval_result = future.result()
+                        except Exception as exc:
+                            eval_result = self._record_internal_eval_error(
+                                store=store,
+                                artifacts=artifacts,
+                                candidate=candidate,
+                                reason=f"quick_eval_internal_error:{type(exc).__name__}",
+                            )
+
+                        state.quick_scored += 1
+                        island_quick_counts[island_id] = island_quick_counts.get(island_id, 0) + 1
+                        quick_fitness = float(eval_result.quick_score.scalar_fitness)
+                        quick_baseline = island_quick_frontier.get(island_id)
+                        should_threshold = self._should_run_full(
+                            quick_fitness=quick_fitness,
+                            quick_baseline=quick_baseline,
+                        )
+                        self._update_quick_frontier(
+                            frontier=island_quick_frontier,
+                            island_id=island_id,
+                            quick_fitness=quick_fitness,
+                        )
+
+                        self._record_iteration_metrics(
+                            store=store,
+                            state=state,
+                            iteration=iteration,
+                            islands=islands,
+                            swarm=swarm,
+                            active_island_id=island.policy.island_id,
+                            candidate_id=candidate.candidate_id,
+                            quick_fitness=quick_fitness,
+                            full_fitness=None,
+                            quick_median_us=self._benchmark_median_us(eval_result.quick_benchmark),
+                            full_median_us=None,
+                            reason="quick_evaluated",
+                        )
+
+                        full_attempted = island_full_attempts.get(island_id, 0)
+                        should_force_first = self.config.force_first_full_per_island and full_attempted == 0
+                        periodic_every = max(0, int(self.config.periodic_full_eval_every_quick))
+                        should_periodic = periodic_every > 0 and (island_quick_counts[island_id] % periodic_every == 0)
+                        if should_force_first or should_periodic or should_threshold:
+                            top = island.archive.top_elites(1)
+                            island_top_fitness = float(top[0].fitness) if top else None
+                            full_gate = swarm.next_judge().review(
+                                candidate=candidate,
+                                static=eval_result.static_check,
+                                stage="full_gate",
+                                quick_fitness=quick_fitness,
+                                quick_median_us=self._benchmark_median_us(eval_result.quick_benchmark),
+                                island_top_fitness=island_top_fitness,
+                            )
+                            swarm.usage.add(full_gate.usage)
+                            eval_result.full_judge = full_gate
+                            artifacts.write_json(
+                                artifacts.candidate_dir(candidate.run_id, candidate.candidate_id, "agent")
+                                / "judge_full_decision.json",
+                                full_gate,
+                            )
+
+                            if full_gate.compile_worthy:
+                                island_full_attempts[island_id] = full_attempted + 1
+                                pending_full.append(
+                                    (
+                                        iteration,
+                                        island.policy.island_id,
+                                        candidate,
+                                        eval_result,
+                                        self._select_remote_client(remote_clients, candidate),
+                                    )
+                                )
+
+                    for future in [f for f in full_eval_futures if f.done()]:
+                        completed_any = True
+                        iteration, island_id, candidate, eval_result, _chosen_remote = full_eval_futures.pop(future)
+                        state.iteration = max(state.iteration, iteration + 1)
+                        island = island_by_id[island_id]
+
+                        full = None
+                        try:
+                            full = future.result()
+                        except Exception:
+                            full = None
+                        if full is not None:
+                            eval_result.full_score = full[0]
+                            eval_result.full_benchmark = full[1]
+                            state.full_scored += 1
+                            self._apply_archive_update(
+                                state=state,
+                                island=island,
+                                islands=islands,
+                                candidates_by_id=candidates_by_id,
+                                artifacts=artifacts,
+                                run_dir=run_dir,
+                                candidate_id=candidate.candidate_id,
+                                descriptor=eval_result.descriptor,
+                                fitness=eval_result.full_score.scalar_fitness,
+                                iteration=iteration,
+                            )
+
+                        self._record_iteration_metrics(
+                            store=store,
+                            state=state,
+                            iteration=iteration,
+                            islands=islands,
+                            swarm=swarm,
+                            active_island_id=island.policy.island_id,
+                            candidate_id=candidate.candidate_id,
+                            quick_fitness=eval_result.quick_score.scalar_fitness,
+                            full_fitness=(eval_result.full_score.scalar_fitness if eval_result.full_score else None),
+                            quick_median_us=self._benchmark_median_us(eval_result.quick_benchmark),
+                            full_median_us=self._benchmark_median_us(eval_result.full_benchmark),
+                            reason=("full_evaluated" if eval_result.full_score else "full_skipped_or_failed"),
+                        )
+
+                    now = time.time()
+                    state.iteration = max(state.iteration, next_iteration)
                     last_checkpoint = self._checkpoint_if_due(
                         checkpoint_path=checkpoint_path,
                         state=state,
                         islands=islands,
                         candidates_by_id=candidates_by_id,
                         swarm=swarm,
-                        now=time.time(),
+                        now=now,
                         last_checkpoint=last_checkpoint,
                     )
-                    continue
 
-                candidate = proposal.candidate
-                if candidate.content_hash in seen_hashes:
-                    state.iteration += 1
-                    continue
-                seen_hashes.add(candidate.content_hash)
-                candidates_by_id[candidate.candidate_id] = candidate
-
-                eval_result = self._evaluate_candidate(
-                    problem=problem,
-                    store=store,
-                    artifacts=artifacts,
-                    candidate=candidate,
-                    swarm=swarm,
-                    remote_client=remote_client,
-                    problem_config=problem_config,
-                    judge_input=proposal,
-                )
-                state.quick_scored += 1
-
-                archive_fitness = eval_result.quick_score.scalar_fitness
-                if self._should_run_full(island, eval_result.quick_score.scalar_fitness):
-                    full = self._evaluate_full(
-                        problem=problem,
-                        store=store,
-                        artifacts=artifacts,
-                        candidate=candidate,
-                        prior_eval=eval_result,
-                        remote_client=remote_client,
-                        problem_config=problem_config,
-                    )
-                    if full is not None:
-                        eval_result.full_score = full[0]
-                        eval_result.full_benchmark = full[1]
-                        archive_fitness = full[0].scalar_fitness
-                        state.full_scored += 1
-
-                if eval_result.descriptor is not None:
-                    update = island.archive.insert(
-                        candidate_id=candidate.candidate_id,
-                        fitness=finite_fitness(archive_fitness),
-                        descriptor=eval_result.descriptor,
-                        iteration=state.iteration,
-                    )
-                    if update.accepted:
-                        island.accepted_updates += 1
-                        state.accepted_updates += 1
-
-                if self._migration_due(state.accepted_updates):
-                    migrations = migrate_ring(
-                        islands,
-                        packet_size=self.config.migration_packet_size,
-                        candidate_by_id=candidates_by_id,
-                    )
-                    if migrations:
-                        artifacts.write_json(
-                            run_dir / "migrations" / f"iter_{state.iteration:06d}.json",
-                            {
-                                "iteration": state.iteration,
-                                "accepted_updates": state.accepted_updates,
-                                "migrations": migrations,
-                            },
-                        )
-
-                state.iteration += 1
-                now = time.time()
-                if self._checkpoint_due(state.iteration, now - last_checkpoint):
-                    self._save_checkpoint(
-                        checkpoint_path=checkpoint_path,
-                        state=state,
-                        islands=islands,
-                        candidates_by_id=candidates_by_id,
+                    inflight = proposal_futures or quick_eval_futures or full_eval_futures
+                    pending = pending_quick or pending_full
+                    budget_exhausted = self._submission_budget_exhausted(
+                        next_iteration=next_iteration,
+                        start_time=start_time,
                         swarm=swarm,
                     )
-                    last_checkpoint = now
+                    if budget_exhausted and not inflight and not pending:
+                        break
+
+                    if not completed_any and inflight:
+                        wait(set(proposal_futures) | set(quick_eval_futures) | set(full_eval_futures), timeout=0.2, return_when=FIRST_COMPLETED)
+                    elif not completed_any and not inflight and not pending:
+                        break
 
             best_candidate_id, best_fitness = self._best_across_islands(islands)
             report_payload = {
@@ -386,6 +615,7 @@ class SwarmSearchRunner:
         seen_hashes: set[str],
         remote_client: RemoteEvaluatorClient | None,
         problem_config: dict[str, Any],
+        island_quick_frontier: dict[str, float | None],
     ) -> None:
         ctx = ProblemRunContext(run_id=state.run_id, seed=self.config.seed)
         baseline = problem.baseline(ctx)
@@ -420,16 +650,40 @@ class SwarmSearchRunner:
             )
             state.quick_scored += 1
             island = islands[idx % len(islands)]
-            if eval_result.descriptor is not None:
-                update = island.archive.insert(
-                    candidate_id=candidate.candidate_id,
-                    fitness=finite_fitness(eval_result.quick_score.scalar_fitness),
-                    descriptor=eval_result.descriptor,
-                    iteration=state.iteration,
-                )
-                if update.accepted:
-                    island.accepted_updates += 1
-                    state.accepted_updates += 1
+            self._update_quick_frontier(
+                frontier=island_quick_frontier,
+                island_id=island.policy.island_id,
+                quick_fitness=eval_result.quick_score.scalar_fitness,
+            )
+
+            if eval_result.descriptor is None:
+                continue
+
+            full = self._evaluate_full(
+                problem=problem,
+                store=store,
+                artifacts=artifacts,
+                candidate=candidate,
+                prior_eval=eval_result,
+                remote_client=remote_client,
+                problem_config=problem_config,
+            )
+            if full is None:
+                continue
+
+            eval_result.full_score = full[0]
+            eval_result.full_benchmark = full[1]
+            state.full_scored += 1
+
+            update = island.archive.insert(
+                candidate_id=candidate.candidate_id,
+                fitness=finite_fitness(eval_result.full_score.scalar_fitness),
+                descriptor=eval_result.descriptor,
+                iteration=state.iteration,
+            )
+            if update.accepted:
+                island.accepted_updates += 1
+                state.accepted_updates += 1
 
     def _evaluate_candidate(
         self,
@@ -464,7 +718,7 @@ class SwarmSearchRunner:
         )
 
         static_local = problem.static_check(candidate)
-        judge = swarm.next_judge().review(candidate=candidate, static=static_local)
+        judge = swarm.next_judge().review(candidate=candidate, static=static_local, stage="triage")
         swarm.usage.add(judge.usage)
         artifacts.write_json(
             artifacts.candidate_dir(run_id, cid, "agent") / "judge_decision.json",
@@ -515,8 +769,37 @@ class SwarmSearchRunner:
                     stage=BenchmarkStage.QUICK,
                     problem_config=problem_config,
                 )
-            except RemoteEvaluationError:
-                remote_result = None
+            except RemoteEvaluationError as exc:
+                score = ScoreRecord(
+                    run_id=run_id,
+                    candidate_id=cid,
+                    stage=BenchmarkStage.QUICK,
+                    scalar_fitness=-1e18,
+                    raw_score={"fitness": -1e18, "reason": "remote_eval_error", "error": str(exc)},
+                )
+                attach_content_hashes(score_record=score)
+                store.save_score(score)
+                artifacts.write_json(
+                    artifacts.candidate_dir(run_id, cid, "agent") / "remote_eval_error.json",
+                    {"error": str(exc)},
+                )
+                store.transition_state(
+                    run_id=run_id,
+                    candidate_id=cid,
+                    from_state=CandidateState.TRIAGED,
+                    to_state=CandidateState.SCORED,
+                    reason="remote eval unavailable",
+                )
+                return CandidateEvaluation(
+                    candidate=candidate,
+                    static_check=static_local,
+                    judge=judge,
+                    build_result=None,
+                    validation_result=None,
+                    quick_benchmark=None,
+                    quick_score=score,
+                    descriptor=None,
+                )
 
         static = remote_result.static_check if remote_result else static_local
         artifacts.write_json(
@@ -533,6 +816,20 @@ class SwarmSearchRunner:
             )
             attach_content_hashes(score_record=score)
             store.save_score(score)
+            store.transition_state(
+                run_id=run_id,
+                candidate_id=cid,
+                from_state=CandidateState.TRIAGED,
+                to_state=CandidateState.REJECTED_STATIC,
+                reason="static check failed",
+            )
+            store.transition_state(
+                run_id=run_id,
+                candidate_id=cid,
+                from_state=CandidateState.REJECTED_STATIC,
+                to_state=CandidateState.SCORED,
+                reason="scored static reject",
+            )
             return CandidateEvaluation(
                 candidate=candidate,
                 static_check=static,
@@ -575,6 +872,20 @@ class SwarmSearchRunner:
             )
             attach_content_hashes(score_record=score)
             store.save_score(score)
+            store.transition_state(
+                run_id=run_id,
+                candidate_id=cid,
+                from_state=CandidateState.QUEUED_BUILD,
+                to_state=CandidateState.BUILD_FAILED,
+                reason="build failed",
+            )
+            store.transition_state(
+                run_id=run_id,
+                candidate_id=cid,
+                from_state=CandidateState.BUILD_FAILED,
+                to_state=CandidateState.SCORED,
+                reason="scored build failure",
+            )
             return CandidateEvaluation(
                 candidate=candidate,
                 static_check=static,
@@ -611,6 +922,20 @@ class SwarmSearchRunner:
             )
             attach_content_hashes(score_record=score)
             store.save_score(score)
+            store.transition_state(
+                run_id=run_id,
+                candidate_id=cid,
+                from_state=CandidateState.QUEUED_BUILD,
+                to_state=CandidateState.INVALID,
+                reason="validation failed",
+            )
+            store.transition_state(
+                run_id=run_id,
+                candidate_id=cid,
+                from_state=CandidateState.INVALID,
+                to_state=CandidateState.SCORED,
+                reason="scored validation failure",
+            )
             return CandidateEvaluation(
                 candidate=candidate,
                 static_check=static,
@@ -761,14 +1086,18 @@ class SwarmSearchRunner:
             profile={},
         )
 
-    def _should_run_full(self, island: IslandState, quick_fitness: float) -> bool:
-        top = island.archive.top_elites(1)
-        if not top:
+    def _should_run_full(self, *, quick_fitness: float, quick_baseline: float | None) -> bool:
+        fitness = finite_fitness(float(quick_fitness))
+        if fitness <= -1e17:
+            return False
+        if quick_baseline is None:
             return True
-        baseline = top[0].fitness
+        baseline = finite_fitness(float(quick_baseline))
+        if baseline <= -1e17:
+            return True
         if baseline <= 0:
-            return quick_fitness > baseline
-        return quick_fitness >= (baseline * self.config.full_trigger_ratio)
+            return fitness > baseline
+        return fitness >= (baseline * self.config.full_trigger_ratio)
 
     def _select_parent_candidate(
         self,
@@ -910,6 +1239,210 @@ class SwarmSearchRunner:
         return self.workspace / "checkpoints" / "latest.json"
 
     @staticmethod
+    def _benchmark_median_us(benchmark: BenchmarkResult | None) -> float | None:
+        if benchmark is None:
+            return None
+        if benchmark.status is not BenchmarkStatus.SUCCESS:
+            return None
+        return float(benchmark.timing.median_us)
+
+    @staticmethod
+    def _update_quick_frontier(
+        *,
+        frontier: dict[str, float | None],
+        island_id: str,
+        quick_fitness: float | None,
+    ) -> None:
+        if quick_fitness is None:
+            return
+        fitness = finite_fitness(float(quick_fitness))
+        if fitness <= -1e17:
+            return
+        current = frontier.get(island_id)
+        if current is None or fitness > current:
+            frontier[island_id] = fitness
+
+    def _remote_eval_urls(self) -> list[str]:
+        raw = (self.config.remote_eval_url or "").strip()
+        if not raw:
+            return []
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
+    def _select_remote_client(
+        self,
+        remote_clients: list[RemoteEvaluatorClient],
+        candidate: Candidate,
+    ) -> RemoteEvaluatorClient | None:
+        if not remote_clients:
+            return None
+        if len(remote_clients) == 1:
+            return remote_clients[0]
+        key = (candidate.content_hash or candidate.candidate_id or "").encode("utf-8")
+        if not key:
+            return remote_clients[0]
+        score = 0
+        for idx, value in enumerate(key):
+            score += (idx + 1) * value
+        return remote_clients[score % len(remote_clients)]
+
+    def _submission_budget_exhausted(
+        self,
+        *,
+        next_iteration: int,
+        start_time: float,
+        swarm: SwarmAgentPool,
+    ) -> bool:
+        if next_iteration >= self.config.max_iterations:
+            return True
+        if (time.time() - start_time) >= max(1.0, self.config.max_minutes * 60.0):
+            return True
+        if self.config.token_budget > 0 and swarm.usage.total_tokens >= self.config.token_budget:
+            return True
+        return False
+
+    def _apply_archive_update(
+        self,
+        *,
+        state: SearchState,
+        island: IslandState,
+        islands: list[IslandState],
+        candidates_by_id: dict[str, Candidate],
+        artifacts: ArtifactStore,
+        run_dir: Path,
+        candidate_id: str,
+        descriptor: Descriptor | None,
+        fitness: float,
+        iteration: int,
+    ) -> None:
+        if descriptor is None:
+            return
+        update = island.archive.insert(
+            candidate_id=candidate_id,
+            fitness=finite_fitness(fitness),
+            descriptor=descriptor,
+            iteration=iteration,
+        )
+        if not update.accepted:
+            return
+        island.accepted_updates += 1
+        state.accepted_updates += 1
+        if not self._migration_due(state.accepted_updates):
+            return
+        migrations = migrate_ring(
+            islands,
+            packet_size=self.config.migration_packet_size,
+            candidate_by_id=candidates_by_id,
+        )
+        if not migrations:
+            return
+        artifacts.write_json(
+            run_dir / "migrations" / f"iter_{iteration:06d}.json",
+            {
+                "iteration": iteration,
+                "accepted_updates": state.accepted_updates,
+                "migrations": migrations,
+            },
+        )
+
+    def _record_internal_eval_error(
+        self,
+        *,
+        store: SQLiteStore,
+        artifacts: ArtifactStore,
+        candidate: Candidate,
+        reason: str,
+    ) -> CandidateEvaluation:
+        score = ScoreRecord(
+            run_id=candidate.run_id,
+            candidate_id=candidate.candidate_id,
+            stage=BenchmarkStage.QUICK,
+            scalar_fitness=-1e18,
+            raw_score={"fitness": -1e18, "reason": reason},
+        )
+        attach_content_hashes(score_record=score)
+        store.save_candidate(candidate, CandidateState.PROPOSED)
+        store.save_score(score)
+        store.transition_state(
+            run_id=candidate.run_id,
+            candidate_id=candidate.candidate_id,
+            from_state=None,
+            to_state=CandidateState.DEAD_LETTER,
+            reason=reason,
+        )
+        artifacts.write_json(
+            artifacts.candidate_dir(candidate.run_id, candidate.candidate_id, "agent") / "internal_eval_error.json",
+            {"reason": reason},
+        )
+        return CandidateEvaluation(
+            candidate=candidate,
+            static_check=StaticCheckResult(candidate_id=candidate.candidate_id, ok=False, reasons=[reason]),
+            judge=None,
+            build_result=None,
+            validation_result=None,
+            quick_benchmark=None,
+            quick_score=score,
+            descriptor=None,
+        )
+
+    def _record_iteration_metrics(
+        self,
+        *,
+        store: SQLiteStore,
+        state: SearchState,
+        iteration: int,
+        islands: list[IslandState],
+        swarm: SwarmAgentPool,
+        active_island_id: str,
+        candidate_id: str | None,
+        quick_fitness: float | None,
+        full_fitness: float | None,
+        quick_median_us: float | None,
+        full_median_us: float | None,
+        reason: str,
+    ) -> None:
+        global_best_candidate_id, global_best_fitness = self._best_across_islands(islands)
+        metrics: list[IterationMetric] = []
+        for island in islands:
+            top = island.archive.top_elites(1)
+            island_top_fitness = float(top[0].fitness) if top else None
+
+            is_active = island.policy.island_id == active_island_id
+            metric = IterationMetric(
+                run_id=state.run_id,
+                iteration=iteration,
+                island_id=island.policy.island_id,
+                candidate_id=(candidate_id if is_active else None),
+                quick_fitness=(quick_fitness if is_active else None),
+                full_fitness=(full_fitness if is_active else None),
+                quick_median_us=(quick_median_us if is_active else None),
+                full_median_us=(full_median_us if is_active else None),
+                island_top_fitness=island_top_fitness,
+                island_coverage_ratio=island.archive.coverage_ratio(),
+                island_occupied_bins=island.archive.occupied_bins,
+                island_accepted_updates=island.accepted_updates,
+                global_best_candidate_id=global_best_candidate_id,
+                global_best_fitness=global_best_fitness,
+                total_tokens=swarm.usage.total_tokens,
+                payload={
+                    "reason": reason,
+                    "active_island_id": active_island_id,
+                    "imported_parent_queue_len": len(island.imported_parent_ids),
+                },
+            )
+            attach_content_hashes(iteration_metric=metric)
+            metrics.append(metric)
+        store.save_iteration_metrics(metrics)
+
+    @staticmethod
+    def _get_prompt_context(problem: OptimizationProblem) -> dict[str, Any] | None:
+        fn = getattr(problem, "generator_prompt_context", None)
+        if callable(fn):
+            ctx = fn()
+            if isinstance(ctx, dict) and ctx:
+                return ctx
+        return None
+
+    @staticmethod
     def _problem_config(problem: OptimizationProblem) -> dict[str, Any]:
         to_config = getattr(problem, "to_config_dict", None)
         if callable(to_config):
@@ -922,10 +1455,12 @@ class SwarmSearchRunner:
         if not self.config.llm_enabled:
             return None
         config = NemotronConfig(
+            provider=self.config.nemotron_provider,
             model=self.config.nemotron_model,
             base_url=self.config.nemotron_base_url,
             api_key=self.config.nemotron_api_key,
             api_key_env=self.config.nemotron_api_key_env,
+            max_concurrent_requests=self.config.nemotron_max_concurrent_requests,
         )
         # Validate key availability up front.
         config.resolved_api_key()
