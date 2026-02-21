@@ -347,18 +347,37 @@ class KernelBenchProblem(OptimizationProblem):
                 num_perf_trials=max(1, self.config.quick_perf_trials),
             )
         except Exception as exc:
-            digest_src = f"infra_error:{type(exc).__name__}:{exc}"
+            # Classify candidate-caused GPU/compilation errors as FAILURE (bad code),
+            # not INFRA_ERROR.  Only truly unexpected errors are infra.
+            exc_name = type(exc).__name__
+            _CANDIDATE_ERROR_NAMES = {
+                "AcceleratorError", "CompilationError", "CompileError",
+                "OutOfMemoryError", "CUDARuntimeError",
+            }
+            is_candidate_error = (
+                exc_name in _CANDIDATE_ERROR_NAMES
+                or isinstance(exc, (RuntimeError, SyntaxError, TypeError, ValueError))
+            )
+            build_status = BuildStatus.FAILURE if is_candidate_error else BuildStatus.INFRA_ERROR
+            error_summary = f"{exc_name}: {exc}"
+            digest_src = f"{build_status.value}:{error_summary}"
+            _log.warning(
+                "Kernel eval %s for %s: %s",
+                build_status.value,
+                candidate.candidate_id[:8],
+                error_summary[:200],
+            )
             return BuildExecution(
                 result=BuildResult(
                     run_id=candidate.run_id,
                     candidate_id=candidate.candidate_id,
-                    status=BuildStatus.INFRA_ERROR,
+                    status=build_status,
                     build_backend="kernelbench",
                     duration_ms=int((time.perf_counter_ns() - start_ns) / 1_000_000),
                     stderr_digest=sha256_text(digest_src),
                     artifacts={},
                     compiler_metrics={},
-                    toolchain_fingerprint={"backend": "kernelbench", "error_type": type(exc).__name__},
+                    toolchain_fingerprint={"backend": "kernelbench", "error_type": exc_name},
                 ),
                 runtime=None,
             )
@@ -403,6 +422,10 @@ class KernelBenchProblem(OptimizationProblem):
     def validate(self, candidate: Candidate, build: BuildExecution) -> ValidationResult:
         tolerance = ValidationTolerance(mode="kernelbench", rtol=0.0, atol=0.0)
         if build.result.status is not BuildStatus.SUCCESS or not isinstance(build.runtime, _KernelBenchRuntime):
+            error_type = (build.result.toolchain_fingerprint or {}).get("error_type", "")
+            build_summary = f"build_{build.result.status.value}"
+            if error_type:
+                build_summary += f": {error_type}"
             return ValidationResult(
                 run_id=candidate.run_id,
                 candidate_id=candidate.candidate_id,
@@ -410,7 +433,7 @@ class KernelBenchProblem(OptimizationProblem):
                 tests_total=0,
                 tests_passed=0,
                 tolerance=tolerance,
-                failing_cases=[ValidationFailureCase(case_id="build", summary="build failed")],
+                failing_cases=[ValidationFailureCase(case_id="build", summary=build_summary)],
             )
 
         eval_result = build.runtime.build_eval
