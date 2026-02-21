@@ -476,7 +476,7 @@ function createMcpServer(
         taskBoard.touchTask(agentRecord.currentTaskId);
       }
 
-      const nia = new NiaClient(config.niaApiKey);
+      const nia = new NiaClient(config.niaApiKey, agent_id);
       try {
         if (scope === "project") {
           // Scoped to THIS project's repo + its dependency docs only
@@ -531,7 +531,7 @@ function createMcpServer(
         taskBoard.touchTask(agentRecord.currentTaskId);
       }
 
-      const nia = new NiaClient(config.niaApiKey);
+      const nia = new NiaClient(config.niaApiKey, agent_id);
       try {
         // Use scoped search to find and return relevant content
         const results = await nia.search(query, {

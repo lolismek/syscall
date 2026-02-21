@@ -4,11 +4,39 @@ const log = createLogger("Nia");
 
 const NIA_BASE = "https://apigcp.trynia.ai/v2";
 
+export interface NiaEvent {
+  timestamp: string;
+  type: "index_repo" | "index_docs" | "search_project" | "search_general" | "search_web" | "web_research" | "lookup";
+  source: "orchestrator" | "agent";
+  detail: string;
+  agentId?: string;
+  status: "started" | "success" | "error";
+  durationMs?: number;
+}
+
+const MAX_EVENTS = 100;
+
+/** Global event log visible to all NiaClient instances */
+const eventLog: NiaEvent[] = [];
+
+function pushEvent(event: NiaEvent): void {
+  eventLog.push(event);
+  if (eventLog.length > MAX_EVENTS) {
+    eventLog.splice(0, eventLog.length - MAX_EVENTS);
+  }
+}
+
+export function getNiaEvents(): NiaEvent[] {
+  return eventLog;
+}
+
 export class NiaClient {
   private apiKey: string;
+  private agentId?: string;
 
-  constructor(apiKey: string) {
+  constructor(apiKey: string, agentId?: string) {
     this.apiKey = apiKey;
+    this.agentId = agentId;
   }
 
   private async request(path: string, body: Record<string, unknown>): Promise<unknown> {
@@ -33,9 +61,24 @@ export class NiaClient {
    */
   indexRepoAsync(repository: string): void {
     log.info(`Indexing repo: ${repository}`);
-    this.request("/repositories", { repository }).catch((err) => {
-      log.warn(`Failed to index repo ${repository}: ${err}`);
-    });
+    const event: NiaEvent = {
+      timestamp: new Date().toISOString(),
+      type: "index_repo",
+      source: "orchestrator",
+      detail: repository,
+      status: "started",
+    };
+    pushEvent(event);
+
+    const start = Date.now();
+    this.request("/repositories", { repository })
+      .then(() => {
+        pushEvent({ ...event, timestamp: new Date().toISOString(), status: "success", durationMs: Date.now() - start });
+      })
+      .catch((err) => {
+        log.warn(`Failed to index repo ${repository}: ${err}`);
+        pushEvent({ ...event, timestamp: new Date().toISOString(), status: "error", detail: `${repository}: ${err}`, durationMs: Date.now() - start });
+      });
   }
 
   /**
@@ -44,9 +87,24 @@ export class NiaClient {
    */
   indexDocsAsync(url: string): void {
     log.info(`Indexing docs: ${url}`);
-    this.request("/data-sources", { url }).catch((err) => {
-      log.warn(`Failed to index docs ${url}: ${err}`);
-    });
+    const event: NiaEvent = {
+      timestamp: new Date().toISOString(),
+      type: "index_docs",
+      source: "orchestrator",
+      detail: url,
+      status: "started",
+    };
+    pushEvent(event);
+
+    const start = Date.now();
+    this.request("/data-sources", { url })
+      .then(() => {
+        pushEvent({ ...event, timestamp: new Date().toISOString(), status: "success", durationMs: Date.now() - start });
+      })
+      .catch((err) => {
+        log.warn(`Failed to index docs ${url}: ${err}`);
+        pushEvent({ ...event, timestamp: new Date().toISOString(), status: "error", detail: `${url}: ${err}`, durationMs: Date.now() - start });
+      });
   }
 
   /**
@@ -57,16 +115,34 @@ export class NiaClient {
     query: string,
     opts?: { repositories?: string[]; data_sources?: string[] },
   ): Promise<string> {
+    const isScoped = !!(opts?.repositories || opts?.data_sources);
+    const eventType = isScoped ? "search_project" as const : "search_general" as const;
+    const event: NiaEvent = {
+      timestamp: new Date().toISOString(),
+      type: eventType,
+      source: this.agentId ? "agent" : "orchestrator",
+      detail: query,
+      agentId: this.agentId,
+      status: "started",
+    };
+    pushEvent(event);
+
+    const start = Date.now();
     const body: Record<string, unknown> = { query };
     if (opts?.repositories) body.repositories = opts.repositories;
     if (opts?.data_sources) body.data_sources = opts.data_sources;
 
-    const result = (await this.request("/universal-search", body)) as Record<string, unknown>;
-    // Return the result as a readable string for the agent
-    if (typeof result === "object" && result !== null) {
-      return JSON.stringify(result, null, 2);
+    try {
+      const result = (await this.request("/universal-search", body)) as Record<string, unknown>;
+      const text = typeof result === "object" && result !== null
+        ? JSON.stringify(result, null, 2)
+        : String(result);
+      pushEvent({ ...event, timestamp: new Date().toISOString(), status: "success", durationMs: Date.now() - start });
+      return text;
+    } catch (err) {
+      pushEvent({ ...event, timestamp: new Date().toISOString(), status: "error", detail: `${query}: ${err}`, durationMs: Date.now() - start });
+      throw err;
     }
-    return String(result);
   }
 
   /**
@@ -74,10 +150,27 @@ export class NiaClient {
    * Does NOT touch any indexed repos, so no cross-project contamination.
    */
   async webSearch(query: string): Promise<string> {
-    const result = (await this.request("/web-search", { query })) as Record<string, unknown>;
-    if (typeof result === "object" && result !== null) {
-      return JSON.stringify(result, null, 2);
+    const event: NiaEvent = {
+      timestamp: new Date().toISOString(),
+      type: "search_web",
+      source: this.agentId ? "agent" : "orchestrator",
+      detail: query,
+      agentId: this.agentId,
+      status: "started",
+    };
+    pushEvent(event);
+
+    const start = Date.now();
+    try {
+      const result = (await this.request("/web-search", { query })) as Record<string, unknown>;
+      const text = typeof result === "object" && result !== null
+        ? JSON.stringify(result, null, 2)
+        : String(result);
+      pushEvent({ ...event, timestamp: new Date().toISOString(), status: "success", durationMs: Date.now() - start });
+      return text;
+    } catch (err) {
+      pushEvent({ ...event, timestamp: new Date().toISOString(), status: "error", detail: `${query}: ${err}`, durationMs: Date.now() - start });
+      throw err;
     }
-    return String(result);
   }
 }

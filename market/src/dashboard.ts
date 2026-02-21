@@ -142,6 +142,32 @@ const HTML = `<!DOCTYPE html>
 
   .github-link { font-size: 11px; color: var(--muted); text-decoration: none; }
   .github-link:hover { color: var(--accent); }
+
+  /* Nia Activity Log */
+  .nia-log { max-height: 320px; overflow-y: auto; }
+  .nia-event { display: flex; align-items: flex-start; gap: 8px; padding: 5px 8px; border-radius: 4px; margin-bottom: 2px; font-size: 12px; }
+  .nia-event:hover { background: #ffffff08; }
+  .nia-time { color: var(--muted); font-size: 10px; min-width: 55px; flex-shrink: 0; }
+  .nia-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; min-width: 70px; text-align: center; flex-shrink: 0; }
+  .nia-badge-index_repo { background: #58a6ff22; color: var(--accent); }
+  .nia-badge-index_docs { background: #58a6ff22; color: var(--accent); }
+  .nia-badge-search_project { background: #bc8cff22; color: var(--purple); }
+  .nia-badge-search_general { background: #d2992222; color: var(--yellow); }
+  .nia-badge-search_web { background: #db6d2822; color: var(--orange); }
+  .nia-badge-lookup { background: #bc8cff22; color: var(--purple); }
+  .nia-badge-web_research { background: #db6d2822; color: var(--orange); }
+  .nia-source { font-size: 10px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; }
+  .nia-source-orchestrator { background: #3fb95022; color: var(--green); }
+  .nia-source-agent { background: #d2992222; color: var(--yellow); }
+  .nia-detail { flex: 1; color: var(--text); word-break: break-word; }
+  .nia-status { font-size: 10px; min-width: 14px; flex-shrink: 0; }
+  .nia-status-started { color: var(--yellow); }
+  .nia-status-success { color: var(--green); }
+  .nia-status-error { color: var(--red); }
+  .nia-duration { font-size: 10px; color: var(--muted); min-width: 45px; text-align: right; flex-shrink: 0; }
+  .nia-header-row { display: flex; align-items: center; gap: 8px; }
+  .nia-count { font-size: 11px; color: var(--muted); font-weight: 400; }
+  .nia-powered { font-size: 10px; color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
 </style>
 </head>
 <body>
@@ -247,6 +273,19 @@ const HTML = `<!DOCTYPE html>
           <div class="ratio" id="ratioText">0 / 0</div>
           <div id="checklist"></div>
         </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">
+        <div class="nia-header-row">
+          <span>Nia Activity</span>
+          <span class="nia-powered">powered by Nozomio</span>
+        </div>
+        <span class="nia-count" id="niaCount"></span>
+      </div>
+      <div class="nia-log" id="niaLog">
+        <div class="empty-state">No Nia activity yet</div>
       </div>
     </div>
   </div>
@@ -661,6 +700,40 @@ function renderDetail(data) {
 
   document.getElementById("ratioText").textContent = p.accepted + " / " + p.total + " accepted";
   const cl = document.getElementById("checklist");
+  // Nia Activity Log
+  const niaLog = document.getElementById("niaLog");
+  const niaEvents = data.niaEvents || [];
+  const niaCountEl = document.getElementById("niaCount");
+  if (niaEvents.length === 0) {
+    niaLog.innerHTML = '<div class="empty-state">No Nia activity yet</div>';
+    niaCountEl.textContent = "";
+  } else {
+    niaCountEl.textContent = niaEvents.length + " events";
+    const typeLabel = { index_repo: "INDEX REPO", index_docs: "INDEX DOCS", search_project: "SEARCH", search_general: "GENERAL", search_web: "WEB", web_research: "RESEARCH", lookup: "LOOKUP" };
+    const statusIcon = { started: "\\u25CB", success: "\\u2713", error: "\\u2717" };
+    // Show newest first
+    const sorted = [...niaEvents].reverse();
+    niaLog.innerHTML = sorted.map(e => {
+      const time = new Date(e.timestamp);
+      const hh = String(time.getHours()).padStart(2, "0");
+      const mm = String(time.getMinutes()).padStart(2, "0");
+      const ss = String(time.getSeconds()).padStart(2, "0");
+      const timeStr = hh + ":" + mm + ":" + ss;
+      const badge = typeLabel[e.type] || e.type;
+      const dur = e.durationMs != null ? (e.durationMs / 1000).toFixed(1) + "s" : "";
+      const agentStr = e.agentId ? " [" + e.agentId.split("-").slice(1, 2).join("") + "]" : "";
+      const detailTrunc = e.detail.length > 80 ? e.detail.slice(0, 80) + "..." : e.detail;
+      return '<div class="nia-event">'
+        + '<span class="nia-time">' + timeStr + '</span>'
+        + '<span class="nia-badge nia-badge-' + esc(e.type) + '">' + esc(badge) + '</span>'
+        + '<span class="nia-source nia-source-' + esc(e.source) + '">' + esc(e.source) + esc(agentStr) + '</span>'
+        + '<span class="nia-status nia-status-' + esc(e.status) + '">' + (statusIcon[e.status] || "") + '</span>'
+        + '<span class="nia-detail">' + esc(detailTrunc) + '</span>'
+        + '<span class="nia-duration">' + esc(dur) + '</span>'
+        + '</div>';
+    }).join("");
+  }
+
   cl.innerHTML = data.tasks.map(t => {
     let icon, cls;
     if (t.status === "accepted") { icon = "\\u2713"; cls = "check-accepted"; }

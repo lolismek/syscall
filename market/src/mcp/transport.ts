@@ -6,6 +6,7 @@ import type { GitHubClient } from "../git/github.js";
 import { createProject } from "../orchestrator/create-project.js";
 import { config } from "../utils/config.js";
 import { createLogger } from "../utils/logger.js";
+import { getNiaEvents } from "../knowledge/nia-client.js";
 
 const log = createLogger("Transport");
 
@@ -271,6 +272,7 @@ function buildProjectStatus(ctx: import("../state/project-registry.js").ProjectC
       currentTaskId: a.currentTaskId,
     })),
     progress,
+    niaEvents: getNiaEvents(),
     timestamp: new Date().toISOString(),
   };
 }
