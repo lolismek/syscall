@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local environments and caches
+.venv/
+.uv-cache/
+
+# Local run artifacts
+.runs/
+
+# OS
+.DS_Store
