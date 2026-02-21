@@ -4,11 +4,13 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
+import os from "os";
 
 const exec = promisify(execFile);
 
 const SERVER_URL = process.env.SERVER_URL || "http://localhost:3100/mcp";
 const AGENT_NAME = process.env.AGENT_NAME || "test-worker-1";
+const PROJECT_ID = process.env.PROJECT_ID || "";
 
 async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -17,7 +19,6 @@ async function sleep(ms: number) {
 async function main() {
   console.log(`[TestWorker] Connecting to ${SERVER_URL}...`);
 
-  // Create MCP client
   const client = new Client({
     name: AGENT_NAME,
     version: "0.1.0",
@@ -27,24 +28,54 @@ async function main() {
   await client.connect(transport);
   console.log("[TestWorker] Connected to MCP server");
 
+  // Step 0: If no project ID given, list projects and pick the first one
+  let projectId = PROJECT_ID;
+  if (!projectId) {
+    console.log("[TestWorker] No PROJECT_ID set, listing projects...");
+    const listResult = await client.callTool({
+      name: "list_projects",
+      arguments: {},
+    });
+    const projects = JSON.parse((listResult.content as Array<{ text: string }>)[0].text);
+    if (!projects || projects.length === 0) {
+      console.error("[TestWorker] No projects available");
+      process.exit(1);
+    }
+    projectId = projects[0].id;
+    console.log(`[TestWorker] Auto-selected project: ${projectId} — ${projects[0].name}`);
+  }
+
   // Step 1: Join the project
-  console.log("[TestWorker] Joining project...");
+  console.log(`[TestWorker] Joining project ${projectId}...`);
   const joinResult = await client.callTool({
     name: "join_project",
     arguments: {
+      project_id: projectId,
       agent_name: AGENT_NAME,
       capabilities: ["typescript", "node.js"],
     },
   });
   const joinData = JSON.parse((joinResult.content as Array<{ text: string }>)[0].text);
-  console.log("[TestWorker] Joined:", joinData.project?.name);
-  const agentId = joinData.agentId;
-  const workspace = joinData.workspace;
 
-  if (!agentId || !workspace) {
-    console.error("[TestWorker] Failed to join — no agentId or workspace");
+  if (joinData.error) {
+    console.error("[TestWorker] Failed to join:", joinData.error);
     process.exit(1);
   }
+
+  console.log("[TestWorker] Joined:", joinData.project?.name);
+  const agentId = joinData.agentId;
+  const repoUrl = joinData.repoUrl;
+
+  if (!agentId || !repoUrl) {
+    console.error("[TestWorker] Failed to join — no agentId or repoUrl");
+    process.exit(1);
+  }
+
+  // Clone the repo to a temp directory
+  const cloneDir = path.join(os.tmpdir(), `syscall-worker-${agentId}`);
+  await fs.rm(cloneDir, { recursive: true, force: true });
+  console.log(`[TestWorker] Cloning ${repoUrl} to ${cloneDir}...`);
+  await exec("git", ["clone", repoUrl, cloneDir]);
 
   // Step 2: Get a task
   console.log("[TestWorker] Requesting task...");
@@ -75,12 +106,18 @@ async function main() {
     },
   });
 
-  // Step 4: Do the "work" — write a placeholder file on the branch
+  // Step 4: Do the "work" — fetch, checkout branch, write placeholder files
   console.log("[TestWorker] Working on task...");
-  await exec("git", ["checkout", task.branch], { cwd: workspace });
+  await exec("git", ["fetch", "origin"], { cwd: cloneDir });
+  try {
+    await exec("git", ["checkout", "-B", task.branch, "origin/" + task.branch], { cwd: cloneDir });
+  } catch {
+    // Branch might not exist on remote yet, create locally
+    await exec("git", ["checkout", "-b", task.branch], { cwd: cloneDir });
+  }
 
   for (const filePath of task.filePaths) {
-    const fullPath = path.join(workspace, filePath);
+    const fullPath = path.join(cloneDir, filePath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(
       fullPath,
@@ -89,19 +126,15 @@ async function main() {
     );
   }
 
-  await exec("git", ["add", "."], { cwd: workspace });
-  await exec("git", ["commit", "-m", `${task.id}: ${task.title}`], { cwd: workspace });
-  await exec("git", ["checkout", "main"], { cwd: workspace });
+  await exec("git", ["add", "."], { cwd: cloneDir });
+  await exec("git", ["commit", "-m", `${task.id}: ${task.title}`], { cwd: cloneDir });
 
-  console.log("[TestWorker] Code committed to branch");
+  // Push the branch back
+  console.log("[TestWorker] Pushing branch...");
+  await exec("git", ["push", "origin", task.branch], { cwd: cloneDir });
+  console.log("[TestWorker] Code committed and pushed");
 
-  // Step 5: Check updates before submitting
-  await client.callTool({
-    name: "check_updates",
-    arguments: { agent_id: agentId, task_id: task.id },
-  });
-
-  // Step 6: Submit
+  // Step 5: Submit
   console.log("[TestWorker] Submitting...");
   const submitResult = await client.callTool({
     name: "submit_result",
@@ -109,7 +142,7 @@ async function main() {
   });
   console.log("[TestWorker] Submitted:", JSON.parse((submitResult.content as Array<{ text: string }>)[0].text).message);
 
-  // Step 7: Poll for validation result
+  // Step 6: Poll for validation result
   console.log("[TestWorker] Polling for result...");
   for (let i = 0; i < 30; i++) {
     await sleep(2000);
@@ -131,6 +164,8 @@ async function main() {
     }
   }
 
+  // Cleanup
+  await fs.rm(cloneDir, { recursive: true, force: true });
   await client.close();
   console.log("[TestWorker] Done");
 }

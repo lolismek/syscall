@@ -1,7 +1,7 @@
 import http from "node:http";
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || "3200", 10);
-const API_URL = process.env.API_URL || "http://localhost:3100/api/status";
+const API_BASE = process.env.API_URL || "http://localhost:3100";
 
 const HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -50,7 +50,7 @@ const HTML = `<!DOCTYPE html>
 
   /* Panels */
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }
-  .panel-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 12px; }
+  .panel-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
 
   /* Agents */
   .agents-grid { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -95,70 +95,137 @@ const HTML = `<!DOCTYPE html>
   .badge-blocked { background: #f8514922; color: var(--red); }
   .badge-available { background: #3fb95022; color: var(--green); }
   .broken-dep { color: var(--red); font-weight: 600; }
+
+  /* Project list view */
+  .view-projects, .view-detail { display: none; }
+  .view-projects.active, .view-detail.active { display: block; }
+
+  .project-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 10px; cursor: pointer; transition: border-color 0.15s; display: flex; align-items: center; gap: 16px; }
+  .project-card:hover { border-color: var(--accent); }
+  .project-card-left { flex: 1; }
+  .project-card-name { font-size: 15px; font-weight: 600; color: var(--accent); margin-bottom: 2px; }
+  .project-card-desc { color: var(--muted); font-size: 12px; max-width: 600px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .project-card-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .project-card-progress { text-align: right; min-width: 80px; }
+  .project-card-pct { font-size: 20px; font-weight: 700; color: var(--green); }
+  .project-card-counts { font-size: 11px; color: var(--muted); }
+
+  /* Create form */
+  .create-form { display: flex; gap: 8px; margin-bottom: 16px; }
+  .create-input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; font-family: inherit; font-size: 13px; outline: none; }
+  .create-input:focus { border-color: var(--accent); }
+  .create-input::placeholder { color: var(--muted); }
+  .btn { background: var(--accent); color: #0d1117; border: none; border-radius: 6px; padding: 10px 18px; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .btn:hover { opacity: 0.9; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+  .btn-ghost:hover { border-color: var(--accent); }
+  .create-status { font-size: 12px; margin-top: 6px; min-height: 18px; }
+  .create-status.error { color: var(--red); }
+  .create-status.ok { color: var(--green); }
+
+  .back-link { color: var(--accent); cursor: pointer; font-size: 12px; border: none; background: none; font-family: inherit; padding: 0; }
+  .back-link:hover { text-decoration: underline; }
+
+  .github-link { font-size: 11px; color: var(--muted); text-decoration: none; }
+  .github-link:hover { color: var(--accent); }
 </style>
 </head>
 <body>
 <div class="container">
-  <div class="header">
-    <div class="header-left">
-      <div class="project-name" id="projectName">Connecting...</div>
-      <div class="project-desc" id="projectDesc"></div>
-    </div>
-    <span class="badge badge-planning" id="projectBadge">\u2014</span>
-    <div class="progress-bar-wrap">
-      <div class="progress-label"><span>Progress</span><span id="progressPct">0%</span></div>
-      <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
-    </div>
-    <div class="connection">
-      <span class="dot dot-err" id="connDot"></span>
-      <span id="connLabel">disconnected</span>
-    </div>
-  </div>
 
-  <div class="panel" id="agentsPanel">
-    <div class="panel-title">Agents</div>
-    <div id="agentsList" class="agents-grid">
-      <div class="empty-state">No agents connected</div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="panel-title">Dependency Graph</div>
-    <div class="dep-graph" id="depGraph"></div>
-    <div class="dep-legend">
-      <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#8b949e"></div>Pending</div>
-      <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#d29922"></div>In Progress</div>
-      <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#3fb950"></div>Accepted</div>
-      <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#f85149"></div>Rejected / Failed</div>
-      <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#f85149;border:1px dashed #f85149"></div>Broken Dep</div>
-    </div>
-  </div>
-
-  <div class="grid">
-    <div>
-      <div class="panel">
-        <div class="panel-title">Task Board</div>
-        <div id="taskBoard"></div>
+  <!-- ===== PROJECT LIST VIEW ===== -->
+  <div class="view-projects active" id="viewProjects">
+    <div class="header">
+      <div class="header-left">
+        <div class="project-name">Syscall Market</div>
+        <div class="project-desc">Multi-agent code orchestrator</div>
+      </div>
+      <div class="connection">
+        <span class="dot dot-err" id="connDotList"></span>
+        <span id="connLabelList">disconnected</span>
       </div>
     </div>
-    <div>
-      <div class="panel">
-        <div class="panel-title">Progress</div>
-        <div class="ratio" id="ratioText">0 / 0</div>
-        <div id="checklist"></div>
+
+    <div class="panel">
+      <div class="panel-title">New Project</div>
+      <div class="create-form">
+        <input class="create-input" id="createInput" type="text" placeholder="Describe your project idea... e.g. Build a todo REST API with auth" />
+        <button class="btn" id="createBtn" onclick="createProject()">Create Project</button>
+      </div>
+      <div class="create-status" id="createStatus"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title"><span>Projects</span><span id="projectCount" style="font-weight:400"></span></div>
+      <div id="projectList">
+        <div class="empty-state">No projects yet. Create one above.</div>
       </div>
     </div>
   </div>
+
+  <!-- ===== PROJECT DETAIL VIEW ===== -->
+  <div class="view-detail" id="viewDetail">
+    <div class="header">
+      <div class="header-left">
+        <div><button class="back-link" onclick="showProjectList()">&larr; All Projects</button></div>
+        <div class="project-name" id="projectName">...</div>
+        <div class="project-desc" id="projectDesc"></div>
+        <a class="github-link" id="githubLink" href="#" target="_blank" style="display:none"></a>
+      </div>
+      <span class="badge badge-planning" id="projectBadge">\\u2014</span>
+      <div class="progress-bar-wrap">
+        <div class="progress-label"><span>Progress</span><span id="progressPct">0%</span></div>
+        <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+      </div>
+      <div class="connection">
+        <span class="dot dot-err" id="connDot"></span>
+        <span id="connLabel">disconnected</span>
+      </div>
+    </div>
+
+    <div class="panel" id="agentsPanel">
+      <div class="panel-title">Agents</div>
+      <div id="agentsList" class="agents-grid">
+        <div class="empty-state">No agents connected</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Dependency Graph</div>
+      <div class="dep-graph" id="depGraph"></div>
+      <div class="dep-legend">
+        <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#8b949e"></div>Pending</div>
+        <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#d29922"></div>In Progress</div>
+        <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#3fb950"></div>Accepted</div>
+        <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#f85149"></div>Rejected / Failed</div>
+        <div class="dep-legend-item"><div class="dep-legend-swatch" style="background:#f85149;border:1px dashed #f85149"></div>Broken Dep</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <div class="panel">
+          <div class="panel-title">Task Board</div>
+          <div id="taskBoard"></div>
+        </div>
+      </div>
+      <div>
+        <div class="panel">
+          <div class="panel-title">Progress</div>
+          <div class="ratio" id="ratioText">0 / 0</div>
+          <div id="checklist"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
-const API = "${API_URL}";
-const STATUS_ORDER = ["in_progress", "assigned", "submitted", "pending", "accepted", "rejected", "failed"];
-const STATUS_GROUP = {
-  assigned: "In Progress", in_progress: "In Progress", submitted: "In Progress",
-  pending: "Pending", accepted: "Completed", rejected: "Failed", failed: "Failed",
-};
-const GROUP_ORDER = ["In Progress", "Pending", "Completed", "Failed"];
+const API_BASE = "${API_BASE}";
+let selectedProjectId = null;
+let currentView = "projects"; // "projects" | "detail"
 
 function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
 function relTime(iso) {
@@ -174,11 +241,114 @@ function statusColor(s) {
   return { fill: "#8b949e22", stroke: "#8b949e" };
 }
 
-// Mirrors the backend getAvailableTasks logic so the dashboard shows the truth
+// ---------- View switching ----------
+
+function showProjectList() {
+  selectedProjectId = null;
+  currentView = "projects";
+  document.getElementById("viewProjects").classList.add("active");
+  document.getElementById("viewDetail").classList.remove("active");
+  fetchProjects();
+}
+
+function selectProject(id) {
+  selectedProjectId = id;
+  currentView = "detail";
+  document.getElementById("viewProjects").classList.remove("active");
+  document.getElementById("viewDetail").classList.add("active");
+  pollDetail();
+}
+
+// ---------- Project creation ----------
+
+async function createProject() {
+  const input = document.getElementById("createInput");
+  const btn = document.getElementById("createBtn");
+  const status = document.getElementById("createStatus");
+  const idea = input.value.trim();
+  if (!idea) { status.textContent = "Please enter a project idea."; status.className = "create-status error"; return; }
+
+  btn.disabled = true;
+  status.textContent = "Creating project... (this calls the LLM to plan, may take 30-60s)";
+  status.className = "create-status";
+
+  try {
+    const res = await fetch(API_BASE + "/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idea }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      status.textContent = data.error || "Failed to create project";
+      status.className = "create-status error";
+      return;
+    }
+    status.textContent = "Created: " + (data.name || data.projectId) + " (" + data.taskCount + " tasks)";
+    status.className = "create-status ok";
+    input.value = "";
+    fetchProjects();
+    // Auto-navigate to the new project after a short delay
+    setTimeout(() => selectProject(data.projectId), 800);
+  } catch (err) {
+    status.textContent = "Network error: " + err.message;
+    status.className = "create-status error";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Allow Enter key in input
+document.getElementById("createInput").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") createProject();
+});
+
+// ---------- Project list ----------
+
+async function fetchProjects() {
+  try {
+    const res = await fetch(API_BASE + "/api/projects");
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+
+    document.getElementById("connDotList").className = "dot dot-ok";
+    document.getElementById("connLabelList").textContent = "live";
+
+    const list = data.projects || [];
+    document.getElementById("projectCount").textContent = list.length ? list.length + " total" : "";
+
+    if (list.length === 0) {
+      document.getElementById("projectList").innerHTML = '<div class="empty-state">No projects yet. Create one above.</div>';
+      return;
+    }
+
+    document.getElementById("projectList").innerHTML = list.map(p => {
+      const pct = p.taskCount ? Math.round((p.accepted / p.taskCount) * 100) : 0;
+      const ghHtml = p.githubUrl ? '<span style="margin-left:8px"><a class="github-link" href="' + esc(p.githubUrl) + '" target="_blank" onclick="event.stopPropagation()">' + esc(p.githubUrl) + '</a></span>' : '';
+      return '<div class="project-card" onclick="selectProject(\\'' + esc(p.id) + '\\')">'
+        + '<div class="project-card-left">'
+        + '<div class="project-card-name">' + esc(p.name || p.id) + ' <span class="badge badge-' + esc(p.status) + '">' + esc(p.status) + '</span></div>'
+        + '<div class="project-card-desc">' + esc(p.description || "") + '</div>'
+        + '<div class="project-card-meta">' + esc(p.id) + ' \\u00B7 ' + relTime(p.createdAt) + ghHtml + '</div>'
+        + '</div>'
+        + '<div class="project-card-progress">'
+        + '<div class="project-card-pct">' + pct + '%</div>'
+        + '<div class="project-card-counts">' + p.accepted + '/' + p.taskCount + ' tasks</div>'
+        + '</div>'
+        + '</div>';
+    }).join("");
+  } catch {
+    document.getElementById("connDotList").className = "dot dot-err";
+    document.getElementById("connLabelList").textContent = "disconnected";
+  }
+}
+
+// ---------- Task availability (mirrors backend) ----------
+
 function computeTaskAvailability(tasks) {
   const taskMap = {};
   tasks.forEach(t => taskMap[t.id] = t);
-  const result = {}; // taskId -> { available: bool, blocked: bool, brokenDeps: string[] }
+  const result = {};
   tasks.forEach(t => {
     if (t.status !== "pending") {
       result[t.id] = { available: false, blocked: false, brokenDeps: [] };
@@ -200,13 +370,13 @@ function computeTaskAvailability(tasks) {
   return result;
 }
 
+// ---------- Dependency graph ----------
+
 function renderDepGraph(tasks) {
   const container = document.getElementById("depGraph");
   if (!tasks || tasks.length === 0) { container.innerHTML = '<div class="empty-state">No tasks yet</div>'; return; }
 
   const availability = computeTaskAvailability(tasks);
-
-  // Build adjacency & compute layers via topological sort (Kahn's)
   const taskMap = {};
   tasks.forEach(t => taskMap[t.id] = t);
   const inDeg = {};
@@ -236,18 +406,15 @@ function renderDepGraph(tasks) {
   const missed = tasks.filter(t => !placed.has(t.id)).map(t => t.id);
   if (missed.length) layers.push(missed);
 
-  // Track which layer each node is in
   const nodeLayer = {};
   layers.forEach((layer, li) => layer.forEach(id => { nodeLayer[id] = li; }));
 
-  // Left-to-right layout — layers are columns
   const nodeW = 220, nodeH = 66, gapX = 80, gapY = 24;
   const marginX = 40, marginY = 30;
   const maxPerLayer = Math.max(...layers.map(l => l.length));
   const svgW = layers.length * (nodeW + gapX) - gapX + marginX * 2;
   const svgH = maxPerLayer * (nodeH + gapY) - gapY + marginY * 2;
 
-  // Compute positions — layers go left to right, nodes centered vertically
   const pos = {};
   layers.forEach((layer, li) => {
     const x = marginX + li * (nodeW + gapX);
@@ -258,7 +425,6 @@ function renderDepGraph(tasks) {
     });
   });
 
-  // Build SVG
   let svg = '<svg width="' + svgW + '" height="' + svgH + '" xmlns="http://www.w3.org/2000/svg">';
   svg += '<defs>';
   svg += '<marker id="arrow" viewBox="0 0 10 8" refX="10" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L8,4 L0,7" fill="none" stroke="#484f58" stroke-width="1.5"/></marker>';
@@ -266,7 +432,6 @@ function renderDepGraph(tasks) {
   svg += '<marker id="arrow-red" viewBox="0 0 10 8" refX="10" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L8,4 L0,7" fill="none" stroke="#f85149" stroke-width="1.5"/></marker>';
   svg += '</defs>';
 
-  // Edges — from dependency (left) to dependent (right)
   tasks.forEach(t => {
     t.dependencies.forEach(dep => {
       if (!pos[t.id]) return;
@@ -279,15 +444,12 @@ function renderDepGraph(tasks) {
         const edgeColor = accepted ? "#3fb950" : "#484f58";
         const markerRef = accepted ? "url(#arrow-green)" : "url(#arrow)";
         const opacity = accepted ? "0.6" : "0.4";
-
         const layerSpan = nodeLayer[t.id] - nodeLayer[dep];
 
         if (layerSpan <= 1) {
-          // Adjacent layers — simple bezier, no nodes to cross
           const midX = (x1 + x2) / 2;
           svg += '<path class="dep-edge" d="M' + x1 + ',' + y1 + ' C' + midX + ',' + y1 + ' ' + midX + ',' + y2 + ' ' + x2 + ',' + y2 + '" stroke="' + edgeColor + '" opacity="' + opacity + '" marker-end="' + markerRef + '"/>';
         } else {
-          // Multi-layer span — route around intermediate nodes
           const goUp = y2 <= y1;
           const edgeY = goUp ? Math.min(marginY / 2, Math.min(y1, y2) - 20) : Math.max(svgH - marginY / 2, Math.max(y1 + nodeH, y2 + nodeH) + 20);
           const outX = x1 + gapX * 0.3;
@@ -304,7 +466,6 @@ function renderDepGraph(tasks) {
             + '" stroke="' + edgeColor + '" opacity="' + opacity + '" marker-end="' + markerRef + '"/>';
         }
       } else {
-        // Broken dep
         const to = pos[t.id];
         const x2 = to.x, y2 = to.y + nodeH / 2;
         svg += '<text x="' + (x2 - 8) + '" y="' + (y2 + 4) + '" font-size="9" fill="#f85149" text-anchor="end">' + esc(dep) + '?</text>';
@@ -312,7 +473,6 @@ function renderDepGraph(tasks) {
     });
   });
 
-  // Nodes
   tasks.forEach(t => {
     if (!pos[t.id]) return;
     const p = pos[t.id];
@@ -326,15 +486,10 @@ function renderDepGraph(tasks) {
 
     svg += '<g class="dep-node" transform="translate(' + p.x + ',' + p.y + ')">';
     svg += '<rect width="' + nodeW + '" height="' + nodeH + '" fill="' + c.fill + '" stroke="' + stroke + '"' + (a && a.brokenDeps.length > 0 ? ' stroke-dasharray="4 2"' : '') + '/>';
-
-    // Line 1: task ID + agent
     svg += '<text class="node-id" x="10" y="16">' + esc(t.id) + (agent ? "  \\u2192 " + esc(agent) : "") + '</text>';
-
-    // Line 2: title — clip to node width
     svg += '<text class="node-title" x="10" y="34" clip-path="url(#nodeClip-' + t.id + ')">' + esc(label) + '</text>';
     svg += '<clipPath id="nodeClip-' + t.id + '"><rect x="0" y="20" width="' + (nodeW - 12) + '" height="20"/></clipPath>';
 
-    // Line 3: status line
     let statusText = t.status;
     let statusFill = c.stroke;
     if (t.status === "pending" && a) {
@@ -346,7 +501,6 @@ function renderDepGraph(tasks) {
     else if (t.status === "submitted") { statusText = "\\u2022 validating..."; }
     else if (t.status === "in_progress" || t.status === "assigned") { statusText = "\\u2022 " + t.status.replace("_", " "); }
     svg += '<text class="node-status" x="10" y="54" fill="' + statusFill + '">' + esc(statusText) + '</text>';
-
     svg += '</g>';
   });
 
@@ -354,27 +508,33 @@ function renderDepGraph(tasks) {
   container.innerHTML = svg;
 }
 
-function render(data) {
-  // Header
+// ---------- Detail view render ----------
+
+function renderDetail(data) {
   if (data.project) {
     document.getElementById("projectName").textContent = data.project.name;
     document.getElementById("projectDesc").textContent = data.project.description;
     const b = document.getElementById("projectBadge");
     b.textContent = data.project.status;
     b.className = "badge badge-" + data.project.status;
+    const ghLink = document.getElementById("githubLink");
+    if (data.project.githubUrl) {
+      ghLink.href = data.project.githubUrl;
+      ghLink.textContent = data.project.githubUrl;
+      ghLink.style.display = "inline";
+    } else {
+      ghLink.style.display = "none";
+    }
   }
 
-  // Progress bar
   const p = data.progress;
   const pct = p.total ? Math.round((p.accepted / p.total) * 100) : 0;
   document.getElementById("progressPct").textContent = pct + "%";
   document.getElementById("progressFill").style.width = pct + "%";
 
-  // Connection
   document.getElementById("connDot").className = "dot dot-ok";
   document.getElementById("connLabel").textContent = "live";
 
-  // Agents
   const al = document.getElementById("agentsList");
   if (data.agents.length === 0) {
     al.innerHTML = '<div class="empty-state">No agents connected</div>';
@@ -390,12 +550,10 @@ function render(data) {
     }).join("");
   }
 
-  // Compute availability to show accurate status
   const availability = computeTaskAvailability(data.tasks);
   const taskMap = {};
   data.tasks.forEach(t => taskMap[t.id] = t);
 
-  // Task board grouped — split Pending into Available / Blocked
   const STATUS_GROUP_EX = {
     assigned: "In Progress", in_progress: "In Progress", submitted: "In Progress",
     pending: "Pending", accepted: "Completed", rejected: "Failed", failed: "Failed",
@@ -418,7 +576,6 @@ function render(data) {
     html += '<div class="task-group"><div class="task-group-label">' + esc(g) + ' (' + items.length + ')</div>';
     for (const t of items) {
       const a = availability[t.id];
-      // Show deps with status coloring
       let depsHtml = "";
       if (t.dependencies.length) {
         const depParts = t.dependencies.map(depId => {
@@ -429,14 +586,12 @@ function render(data) {
         });
         depsHtml = '<div class="task-detail">deps: ' + depParts.join(", ") + '</div>';
       }
-      // Show broken deps warning
       let warning = "";
       if (a && a.brokenDeps.length > 0) {
         warning = '<div class="task-detail broken-dep">\\u26A0 broken dependency IDs: ' + a.brokenDeps.map(esc).join(", ") + '</div>';
       }
       const agent = t.assignedTo ? '<div class="task-detail">agent: ' + esc(t.assignedTo) + '</div>' : '';
       const branch = t.branch ? '<div class="task-detail">branch: ' + esc(t.branch) + '</div>' : '';
-      // Show refined badge for pending tasks
       let badgeClass = "badge-" + t.status;
       let badgeText = t.status;
       if (t.status === "pending" && a) {
@@ -453,10 +608,8 @@ function render(data) {
   if (!html) html = '<div class="empty-state">No tasks yet</div>';
   tb.innerHTML = html;
 
-  // Dependency graph
   renderDepGraph(data.tasks);
 
-  // Checklist sidebar
   document.getElementById("ratioText").textContent = p.accepted + " / " + p.total + " accepted";
   const cl = document.getElementById("checklist");
   cl.innerHTML = data.tasks.map(t => {
@@ -470,24 +623,32 @@ function render(data) {
   }).join("");
 }
 
-function showDisconnected() {
-  document.getElementById("connDot").className = "dot dot-err";
-  document.getElementById("connLabel").textContent = "disconnected";
-}
+// ---------- Polling ----------
 
-async function poll() {
+async function pollDetail() {
+  if (!selectedProjectId || currentView !== "detail") return;
   try {
-    const res = await fetch(API);
+    const res = await fetch(API_BASE + "/api/status?project_id=" + encodeURIComponent(selectedProjectId));
     if (!res.ok) throw new Error(res.status);
     const data = await res.json();
-    render(data);
+    if (data.project) renderDetail(data);
   } catch {
-    showDisconnected();
+    document.getElementById("connDot").className = "dot dot-err";
+    document.getElementById("connLabel").textContent = "disconnected";
   }
 }
 
-poll();
-setInterval(poll, 3000);
+async function tick() {
+  if (currentView === "projects") {
+    await fetchProjects();
+  } else {
+    await pollDetail();
+  }
+}
+
+// Initial load
+fetchProjects();
+setInterval(tick, 3000);
 </script>
 </body>
 </html>`;
@@ -504,5 +665,5 @@ const server = http.createServer((_req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Dashboard running at http://localhost:${PORT}`);
-  console.log(`Polling API at ${API_URL}`);
+  console.log(`Polling API at ${API_BASE}`);
 });

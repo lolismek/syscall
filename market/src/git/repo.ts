@@ -32,12 +32,32 @@ export class GitRepo {
     }
   }
 
-  async initRepo(): Promise<void> {
-    await fs.rm(this.repoPath, { recursive: true, force: true });
+  async initRepo(opts?: { fresh?: boolean }): Promise<void> {
+    const fresh = opts?.fresh ?? true;
+    const gitDir = path.join(this.repoPath, ".git");
+    let exists = false;
+    try {
+      await fs.stat(gitDir);
+      exists = true;
+    } catch {
+      // doesn't exist
+    }
+
+    if (exists && !fresh) {
+      log.info(`Repo already exists at ${this.repoPath} — skipping init`);
+      return;
+    }
+
+    if (fresh) {
+      await fs.rm(this.repoPath, { recursive: true, force: true });
+    }
     await fs.mkdir(this.repoPath, { recursive: true });
     await this.git("init");
     // Allow clones to push back to this repo
     await this.git("config", "receive.denyCurrentBranch", "updateInstead");
+    // Set committer identity so commits don't use the user's personal profile
+    await this.git("config", "user.name", "Syscall Orchestrator");
+    await this.git("config", "user.email", "orchestrator@syscall.dev");
     // Create initial commit so main branch exists
     const readmePath = path.join(this.repoPath, "README.md");
     await fs.writeFile(readmePath, "# Project\n\nManaged by Syscall orchestrator.\n");
@@ -86,6 +106,13 @@ export class GitRepo {
     return await this.git("diff", mergeBase + ".." + branchName);
   }
 
+  /** Return list of files changed on a branch relative to main */
+  async getChangedFiles(branchName: string): Promise<string[]> {
+    const mergeBase = await this.git("merge-base", "main", branchName);
+    const output = await this.git("diff", "--name-only", mergeBase + ".." + branchName);
+    return output.split("\n").filter(Boolean);
+  }
+
   async readFileFromMain(filePath: string): Promise<string> {
     try {
       return await this.git("show", `main:${filePath}`);
@@ -112,6 +139,36 @@ export class GitRepo {
     try {
       const output = await this.git("log", `main..${branchName}`, "--oneline");
       return output.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async addRemote(name: string, url: string): Promise<void> {
+    await this.withLock(async () => {
+      await this.git("remote", "add", name, url);
+    });
+    log.info(`Added remote ${name}: ${url}`);
+  }
+
+  async push(remote: string, branch: string): Promise<void> {
+    await this.withLock(async () => {
+      await this.git("push", remote, branch);
+    });
+    log.debug(`Pushed ${branch} to ${remote}`);
+  }
+
+  async fetch(remote: string): Promise<void> {
+    await this.withLock(async () => {
+      await this.git("fetch", remote);
+    });
+    log.debug(`Fetched from ${remote}`);
+  }
+
+  async hasRemote(name: string): Promise<boolean> {
+    try {
+      await this.git("remote", "get-url", name);
+      return true;
     } catch {
       return false;
     }

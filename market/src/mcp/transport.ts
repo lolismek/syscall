@@ -1,8 +1,9 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { McpServerFactory } from "./server.js";
-import type { TaskBoard } from "../state/task-board.js";
-import type { ProjectStore } from "../state/project-store.js";
+import type { McpServerFactory, SessionContext } from "./server.js";
+import type { ProjectRegistry } from "../state/project-registry.js";
+import type { GitHubClient } from "../git/github.js";
+import { createProject } from "../orchestrator/create-project.js";
 import { config } from "../utils/config.js";
 import { createLogger } from "../utils/logger.js";
 
@@ -10,13 +11,10 @@ const log = createLogger("Transport");
 
 export function createTransport(
   serverFactory: McpServerFactory,
-  taskBoard: TaskBoard,
-  projectStore: ProjectStore,
+  registry: ProjectRegistry,
+  githubClient: GitHubClient | null,
 ): express.Express {
   const app = express();
-  // IMPORTANT: Do NOT use express.json() globally — the MCP StreamableHTTP
-  // transport needs the raw body to parse JSON-RPC itself. Only parse JSON
-  // on non-MCP routes.
   const jsonParser = express.json();
 
   // Auth middleware for /mcp routes
@@ -44,7 +42,9 @@ export function createTransport(
         return;
       }
 
-      // New session — create a fresh server + transport pair
+      // New session — create a fresh server + transport pair with mutable session context
+      const sessionCtx: SessionContext = { projectId: null, agentId: null };
+
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => `session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       });
@@ -52,9 +52,24 @@ export function createTransport(
       transport.onclose = () => {
         const sid = (transport as unknown as { sessionId?: string }).sessionId;
         if (sid) transports.delete(sid);
+
+        // Agent disconnected — return their active task to the pool
+        if (sessionCtx.agentId && sessionCtx.projectId) {
+          const ctx = registry.get(sessionCtx.projectId);
+          if (ctx) {
+            const agent = ctx.taskBoard.getAgent(sessionCtx.agentId);
+            if (agent?.currentTaskId) {
+              const task = ctx.taskBoard.getTask(agent.currentTaskId);
+              if (task && !["accepted", "submitted"].includes(task.status)) {
+                ctx.taskBoard.reassignTask(agent.currentTaskId);
+                log.warn(`Agent ${sessionCtx.agentId} disconnected — task ${agent.currentTaskId} returned to pool`);
+              }
+            }
+          }
+        }
       };
 
-      const server = serverFactory();
+      const server = serverFactory(sessionCtx);
       await server.connect(transport);
       await transport.handleRequest(req, res);
 
@@ -95,52 +110,98 @@ export function createTransport(
   // CORS for /api routes
   app.use("/api", (_req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     if (_req.method === "OPTIONS") { res.sendStatus(204); return; }
     next();
   });
 
-  app.get("/api/status", (_req, res) => {
-    const project = projectStore.getProject();
-    const tasks = taskBoard.getAllTasks();
-    const agents = taskBoard.getAllAgents();
+  // --- POST /api/projects --- Create a new project
+  app.post("/api/projects", jsonParser, async (req, res) => {
+    const { idea, model } = req.body as { idea?: string; model?: string };
+    if (!idea || typeof idea !== "string") {
+      res.status(400).json({ error: "Missing required field: idea (string)" });
+      return;
+    }
 
-    const progress = {
-      total: tasks.length,
-      accepted: tasks.filter((t) => t.status === "accepted").length,
-      inProgress: tasks.filter((t) => ["assigned", "in_progress", "submitted"].includes(t.status)).length,
-      pending: tasks.filter((t) => t.status === "pending").length,
-      failed: tasks.filter((t) => ["rejected", "failed"].includes(t.status)).length,
-    };
+    if (model) {
+      config.model = model;
+    }
 
-    res.json({
-      project: project
-        ? { id: project.id, name: project.name, description: project.description, status: project.status }
-        : null,
-      tasks: tasks.map((t) => ({
-        id: t.id,
-        title: t.spec.title,
-        status: t.status,
-        assignedTo: t.assignedTo,
-        branch: t.branch,
-        dependencies: t.spec.dependencies,
-        filePaths: t.spec.filePaths,
-      })),
-      agents: agents.map((a) => ({
-        id: a.id,
-        name: a.name,
-        capabilities: a.capabilities,
-        joinedAt: a.joinedAt,
-        currentTaskId: a.currentTaskId,
-      })),
-      progress,
-      timestamp: new Date().toISOString(),
-    });
+    try {
+      const ctx = await createProject(idea, registry, githubClient, config.workspacePath);
+      res.status(201).json({
+        projectId: ctx.project.id,
+        name: ctx.project.name,
+        description: ctx.project.description,
+        githubUrl: ctx.project.githubRepoUrl,
+        taskCount: ctx.taskBoard.getAllTasks().length,
+      });
+    } catch (err) {
+      log.error(`Failed to create project: ${err}`);
+      res.status(500).json({ error: `Failed to create project: ${err}` });
+    }
   });
 
-  app.get("/health", jsonParser, (_req, res) => {
-    res.json({ status: "ok" });
+  // --- GET /api/projects --- List all projects
+  app.get("/api/projects", (_req, res) => {
+    const projects = registry.list().map((ctx) => {
+      const tasks = ctx.taskBoard.getAllTasks();
+      const accepted = tasks.filter((t) => t.status === "accepted").length;
+      const inProgress = tasks.filter((t) => ["assigned", "in_progress", "submitted"].includes(t.status)).length;
+      return {
+        id: ctx.project.id,
+        name: ctx.project.name,
+        description: ctx.project.description,
+        status: ctx.project.status,
+        githubUrl: ctx.project.githubRepoUrl,
+        taskCount: tasks.length,
+        accepted,
+        inProgress,
+        createdAt: ctx.project.createdAt,
+      };
+    });
+    res.json({ projects });
+  });
+
+  // --- GET /api/status --- Project-specific or all-projects status
+  app.get("/api/status", (req, res) => {
+    const projectId = req.query.project_id as string | undefined;
+
+    if (projectId) {
+      // Detailed status for a specific project
+      const ctx = registry.get(projectId);
+      if (!ctx) {
+        res.status(404).json({ error: `Project not found: ${projectId}` });
+        return;
+      }
+      res.json(buildProjectStatus(ctx));
+    } else {
+      // If only one project exists, return its status directly (backwards compat)
+      const all = registry.list();
+      if (all.length === 1) {
+        res.json(buildProjectStatus(all[0]));
+      } else if (all.length === 0) {
+        res.json({ project: null, tasks: [], agents: [], progress: { total: 0, accepted: 0, inProgress: 0, pending: 0, failed: 0 }, timestamp: new Date().toISOString() });
+      } else {
+        // Multiple projects — return summary list
+        const projects = all.map((ctx) => {
+          const tasks = ctx.taskBoard.getAllTasks();
+          return {
+            id: ctx.project.id,
+            name: ctx.project.name,
+            status: ctx.project.status,
+            total: tasks.length,
+            accepted: tasks.filter((t) => t.status === "accepted").length,
+          };
+        });
+        res.json({ projects, timestamp: new Date().toISOString() });
+      }
+    }
+  });
+
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", projects: registry.list().length });
   });
 
   // Catch OAuth endpoints — we don't use auth
@@ -152,4 +213,46 @@ export function createTransport(
   });
 
   return app;
+}
+
+function buildProjectStatus(ctx: import("../state/project-registry.js").ProjectContext) {
+  const { project, taskBoard } = ctx;
+  const tasks = taskBoard.getAllTasks();
+  const agents = taskBoard.getAllAgents();
+
+  const progress = {
+    total: tasks.length,
+    accepted: tasks.filter((t) => t.status === "accepted").length,
+    inProgress: tasks.filter((t) => ["assigned", "in_progress", "submitted"].includes(t.status)).length,
+    pending: tasks.filter((t) => t.status === "pending").length,
+    failed: tasks.filter((t) => ["rejected", "failed"].includes(t.status)).length,
+  };
+
+  return {
+    project: {
+      id: project.id,
+      name: project.name,
+      description: project.description,
+      status: project.status,
+      githubUrl: project.githubRepoUrl,
+    },
+    tasks: tasks.map((t) => ({
+      id: t.id,
+      title: t.spec.title,
+      status: t.status,
+      assignedTo: t.assignedTo,
+      branch: t.branch,
+      dependencies: t.spec.dependencies,
+      filePaths: t.spec.filePaths,
+    })),
+    agents: agents.map((a) => ({
+      id: a.id,
+      name: a.name,
+      capabilities: a.capabilities,
+      joinedAt: a.joinedAt,
+      currentTaskId: a.currentTaskId,
+    })),
+    progress,
+    timestamp: new Date().toISOString(),
+  };
 }

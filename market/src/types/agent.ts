@@ -4,4 +4,5 @@ export interface AgentInfo {
   capabilities: string[];
   joinedAt: Date;
   currentTaskId: string | null;
+  projectId: string;
 }

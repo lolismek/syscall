@@ -1,21 +1,19 @@
 import "dotenv/config";
-import fs from "fs/promises";
-import path from "path";
-import { TaskBoard } from "./state/task-board.js";
-import { ProjectStore } from "./state/project-store.js";
-import { GitRepo } from "./git/repo.js";
+import { ProjectRegistry } from "./state/project-registry.js";
+import { GitHubClient } from "./git/github.js";
 import { createMcpServerFactory } from "./mcp/server.js";
 import { createTransport } from "./mcp/transport.js";
-import { planProject, validateSubmission } from "./orchestrator/actions.js";
+import { createProject } from "./orchestrator/create-project.js";
+import { validateSubmission } from "./orchestrator/actions.js";
 import { config } from "./utils/config.js";
 import { createLogger } from "./utils/logger.js";
 
 const log = createLogger("Main");
 
-function parseArgs(): { projectIdea: string; fresh: boolean } {
+function parseArgs(): { projectIdea: string | null; fresh: boolean } {
   const args = process.argv.slice(2);
   let model: string | undefined;
-  let projectIdea: string | undefined;
+  let projectIdea: string | null = null;
   let fresh = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -23,6 +21,11 @@ function parseArgs(): { projectIdea: string; fresh: boolean } {
       model = args[++i];
     } else if (args[i] === "--fresh") {
       fresh = true;
+    } else if (args[i] === "--wait" || args[i] === "-w") {
+      config.agentWaitMs = parseInt(args[++i], 10) * 1000;
+    } else if (args[i] === "--help" || args[i] === "-h") {
+      printUsage();
+      process.exit(0);
     } else if (!projectIdea) {
       projectIdea = args[i];
     }
@@ -32,17 +35,27 @@ function parseArgs(): { projectIdea: string; fresh: boolean } {
     config.model = model;
   }
 
-  if (!projectIdea) {
-    console.error(`Usage: npx tsx src/index.ts [--model <model>] [--fresh] "<project idea>"
+  return { projectIdea, fresh };
+}
+
+function printUsage(): void {
+  console.log(`Usage: npx tsx src/index.ts [--model <model>] [--fresh] ["<project idea>"]
+
+Modes:
+  With idea:    Creates a project and starts the server
+  Without idea: Starts the server only (create projects via POST /api/projects)
 
 Options:
   --model, -m    Anthropic model to use (default: ${config.model})
-  --fresh        Force re-plan (deletes saved state)
+  --fresh        Force re-plan (wipes existing project state)
+  --wait, -w     Seconds to wait for agents before assigning tasks (default: ${config.agentWaitMs / 1000}s)
+  --help, -h     Show this help
 
 Examples:
-  npx tsx src/index.ts "Build a todo REST API"
-  npx tsx src/index.ts --model claude-opus-4-5-20250514 "Build a chat app"
-  npx tsx src/index.ts --fresh "Build a todo REST API"
+  npx tsx src/index.ts                          # Server-only mode
+  npx tsx src/index.ts "Build a todo REST API"  # Create project + start server
+  npx tsx src/index.ts --fresh "Build a todo API"
+  curl -X POST localhost:3100/api/projects -H 'Content-Type: application/json' -d '{"idea":"Build a chat app"}'
 
 Environment variables (set in .env or shell):
   ANTHROPIC_API_KEY   Required — your Anthropic API key
@@ -51,12 +64,11 @@ Environment variables (set in .env or shell):
   WORKSPACE_PATH      Git workspace path (default: ./workspace)
   LOG_LEVEL           debug | info | warn | error (default: info)
   TASK_TIMEOUT_MS     Agent inactivity timeout in ms (default: 900000 = 15min)
+  AGENT_WAIT_MS       Wait time in ms for agents to join before tasks start (default: 0)
   AGENT_API_KEY       Shared API key for /mcp auth (unset = no auth)
+  GITHUB_ORG          GitHub organization for auto-creating repos
+  GITHUB_TOKEN        GitHub personal access token (required if GITHUB_ORG is set)
 `);
-    process.exit(1);
-  }
-
-  return { projectIdea, fresh };
 }
 
 async function main() {
@@ -76,87 +88,81 @@ async function main() {
   log.info(`Port: ${config.port}`);
   log.info(`Auth: ${config.agentApiKey ? "enabled" : "disabled (no AGENT_API_KEY set)"}`);
   log.info(`Task timeout: ${config.taskTimeoutMs}ms`);
-
-  // State file path — outside workspace/ since initRepo() wipes it
-  const statePath = path.join(path.dirname(config.workspacePath), ".orchestrator-state.json");
-
-  // Initialize shared state
-  const taskBoard = new TaskBoard();
-  const projectStore = new ProjectStore();
-  const gitRepo = new GitRepo(config.workspacePath);
-
-  // Set save paths for persistence
-  taskBoard.setSavePath(statePath);
-  projectStore.setSavePath(statePath);
-
-  // Check for --fresh flag
-  if (fresh) {
-    try {
-      await fs.unlink(statePath);
-      log.info("Deleted state file (--fresh mode)");
-    } catch {
-      // File didn't exist, that's fine
-    }
+  if (config.agentWaitMs > 0) {
+    log.info(`Agent wait: ${config.agentWaitMs / 1000}s before task assignment`);
   }
 
-  // Try to hydrate from saved state
-  let hydrated = false;
-  if (!fresh) {
-    try {
-      const raw = await fs.readFile(statePath, "utf-8");
-      const savedState = JSON.parse(raw);
-
-      if (savedState.tasks && savedState.agents) {
-        // Rehydrate Date fields on tasks
-        for (const [, task] of savedState.tasks) {
-          task.createdAt = new Date(task.createdAt);
-          task.updatedAt = new Date(task.updatedAt);
-          task.lastActivityAt = task.lastActivityAt ? new Date(task.lastActivityAt) : task.updatedAt;
-        }
-        // Rehydrate Date fields on agents
-        for (const [, agent] of savedState.agents) {
-          agent.joinedAt = new Date(agent.joinedAt);
-        }
-        taskBoard.hydrate(savedState);
-        hydrated = true;
-        log.info("Hydrated task board from state file");
-      }
-
-      if (savedState.project) {
-        projectStore.hydrateProject(savedState.project);
-        hydrated = true;
-        log.info("Hydrated project from state file");
-      }
-    } catch {
-      // No state file or invalid — will plan from scratch
-    }
-  }
-
-  if (!hydrated) {
-    // Initialize git repo (wipes workspace)
-    await gitRepo.initRepo();
-    log.info("Git repo initialized");
-
-    // Plan the project using the orchestrator
-    log.info("Planning project...");
-    const plan = await planProject(projectIdea, taskBoard, projectStore, gitRepo);
-    log.info(`Project planned: ${plan.projectId}`);
-    log.info(`Scaffold files: ${plan.scaffold.length}`);
-    log.info(`Tasks created: ${plan.tasks.length}`);
+  // Initialize GitHub client if configured
+  let githubClient: GitHubClient | null = null;
+  if (config.githubOrg && config.githubToken) {
+    githubClient = new GitHubClient(config.githubOrg, config.githubToken);
+    log.info(`GitHub: ${config.githubOrg} (repos will be created automatically)`);
   } else {
-    log.info("Resuming from saved state — skipping planning");
+    log.info("GitHub: disabled (set GITHUB_ORG and GITHUB_TOKEN to enable)");
   }
 
-  // Print task summary
-  const tasks = taskBoard.getAllTasks();
-  console.log("\n=== Tasks ===");
-  for (const task of tasks) {
-    const deps = task.spec.dependencies.length > 0 ? ` (depends on: ${task.spec.dependencies.join(", ")})` : "";
-    console.log(`  ${task.id}: ${task.spec.title} [${task.status}]${deps}`);
-  }
-  console.log("");
+  // Create project registry
+  const registry = new ProjectRegistry();
 
-  // Wire up validation on task submission
+  // Hydrate existing projects from workspace (unless --fresh)
+  if (!fresh) {
+    await registry.hydrateAll(config.workspacePath);
+    const existing = registry.list();
+    if (existing.length > 0) {
+      log.info(`Hydrated ${existing.length} existing project(s)`);
+      for (const ctx of existing) {
+        // Re-wire validation handlers for hydrated projects
+        wireValidation(ctx);
+      }
+    }
+  } else {
+    log.info("Fresh mode — skipping hydration");
+  }
+
+  // If CLI idea provided, create a project
+  if (projectIdea) {
+    log.info("Creating project from CLI...");
+    const ctx = await createProject(projectIdea, registry, githubClient, config.workspacePath);
+    log.info(`Project created: ${ctx.project.id} — ${ctx.project.name}`);
+
+    // Print task summary
+    const tasks = ctx.taskBoard.getAllTasks();
+    console.log("\n=== Tasks ===");
+    for (const task of tasks) {
+      const deps = task.spec.dependencies.length > 0 ? ` (depends on: ${task.spec.dependencies.join(", ")})` : "";
+      console.log(`  ${task.id}: ${task.spec.title} [${task.status}]${deps}`);
+    }
+    console.log("");
+  }
+
+  // Task timeout sweep — check every 60s for timed-out tasks across all projects
+  setInterval(() => {
+    for (const ctx of registry.list()) {
+      const timedOut = ctx.taskBoard.getTimedOutTasks(config.taskTimeoutMs);
+      for (const task of timedOut) {
+        log.warn(`Task ${task.id} timed out (agent ${task.assignedTo} inactive for >${config.taskTimeoutMs}ms). Reassigning.`);
+        ctx.taskBoard.reassignTask(task.id);
+      }
+    }
+  }, 60_000);
+
+  // Start MCP server
+  const mcpServerFactory = createMcpServerFactory(registry);
+  const app = createTransport(mcpServerFactory, registry, githubClient);
+
+  app.listen(config.port, () => {
+    log.info(`MCP server listening on http://localhost:${config.port}/mcp`);
+    if (!projectIdea) {
+      log.info("Server-only mode — create projects via POST /api/projects");
+    }
+    log.info("Waiting for agents to connect...");
+  });
+}
+
+/** Wire up task_submitted validation for a project context */
+function wireValidation(ctx: import("./state/project-registry.js").ProjectContext): void {
+  const { taskBoard, gitRepo } = ctx;
+
   taskBoard.on("task_submitted", async (task) => {
     log.info(`Task submitted: ${task.id} — starting validation...`);
     try {
@@ -169,24 +175,6 @@ async function main() {
       log.error(`Validation failed for ${task.id}: ${err}`);
       taskBoard.updateTaskStatus(task.id, "rejected", `Validation error: ${err}`);
     }
-  });
-
-  // Task timeout sweep — check every 60s for timed-out tasks
-  setInterval(() => {
-    const timedOut = taskBoard.getTimedOutTasks(config.taskTimeoutMs);
-    for (const task of timedOut) {
-      log.warn(`Task ${task.id} timed out (agent ${task.assignedTo} inactive for >${config.taskTimeoutMs}ms). Reassigning.`);
-      taskBoard.reassignTask(task.id);
-    }
-  }, 60_000);
-
-  // Start MCP server
-  const mcpServerFactory = createMcpServerFactory(taskBoard, projectStore, gitRepo);
-  const app = createTransport(mcpServerFactory, taskBoard, projectStore);
-
-  app.listen(config.port, () => {
-    log.info(`MCP server listening on http://localhost:${config.port}/mcp`);
-    log.info("Waiting for agents to connect...");
   });
 }
 

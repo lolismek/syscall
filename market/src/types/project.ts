@@ -5,7 +5,10 @@ export interface Project {
   name: string;
   description: string;
   createdAt: Date;
+  readyAt: Date;
   status: "planning" | "active" | "completed";
+  githubRepoUrl: string | null;
+  githubRepoName: string | null;
 }
 
 export interface ProjectPlan {

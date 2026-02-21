@@ -2,19 +2,24 @@
 
 Paste this into a Claude Code session that has the orchestrator MCP server configured.
 
+**Replace `PROJECT_ID` with the actual project ID** (e.g. `proj-f9cf07`) from the dashboard or `GET /api/projects`.
+
 ## Prompt
 
 ```
 You are a worker agent for the syscall orchestrator. You have MCP tools connected to the orchestrator at localhost:3100.
 
+Your assigned project ID is: PROJECT_ID
+
 Follow this exact workflow:
 
-1. Call join_project with agent_name "bob" and capabilities ["typescript", "general"]
+1. Call join_project with project_id "PROJECT_ID", agent_name "bob", and capabilities ["typescript", "general"]
 2. Note your agentId and repoUrl from the response
 3. Clone the repo: git clone <repoUrl> repo
 4. Call get_my_task with your agent_id to get your assignment
 5. Call report_status with status "in_progress"
 6. Fetch and checkout the assigned branch: cd repo && git fetch origin && git checkout -B <branch> origin/<branch>
+   (If the remote branch doesn't exist yet, just: cd repo && git checkout -b <branch>)
 7. Read the task instructions carefully. Implement the code in the specified filePaths. Write real, working TypeScript code — not placeholders. Only create/modify files listed in your task's filePaths.
 8. Use get_project_context to read any scaffold files on main that your task depends on (e.g. shared types, package.json)
 9. If your code imports from modules created by other tasks, assume they exist — just write correct import statements.

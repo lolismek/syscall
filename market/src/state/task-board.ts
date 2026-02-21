@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { Task, TaskSpec, TaskStatus } from "../types/task.js";
 import { AgentInfo } from "../types/agent.js";
+import { Project } from "../types/project.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("TaskBoard");
@@ -14,9 +15,24 @@ export class TaskBoard extends EventEmitter {
   private savePath: string | null = null;
   private saveQueued = false;
   private saving = false;
+  private projectShortId: string | null = null;
+  private project: Project | null = null;
 
   setSavePath(savePath: string): void {
     this.savePath = savePath;
+  }
+
+  setProjectShortId(shortId: string): void {
+    this.projectShortId = shortId;
+  }
+
+  setProject(project: Project): void {
+    this.project = project;
+    this.save();
+  }
+
+  getProject(): Project | null {
+    return this.project;
   }
 
   // --- Persistence ---
@@ -35,11 +51,17 @@ export class TaskBoard extends EventEmitter {
     if (!this.savePath) return;
     this.saving = true;
     try {
-      const data = {
+      const data: Record<string, unknown> = {
         tasks: Array.from(this.tasks.entries()),
         agents: Array.from(this.agents.entries()),
         nextTaskNum: this.nextTaskNum,
       };
+      if (this.project) {
+        data.project = this.project;
+      }
+      if (this.projectShortId) {
+        data.projectShortId = this.projectShortId;
+      }
       const dir = path.dirname(this.savePath);
       await fs.mkdir(dir, { recursive: true });
       const tmp = this.savePath + ".tmp";
@@ -84,17 +106,28 @@ export class TaskBoard extends EventEmitter {
     tasks: [string, Task][];
     agents: [string, AgentInfo][];
     nextTaskNum: number;
+    project?: Project;
+    projectShortId?: string;
   }): void {
     this.tasks = new Map(data.tasks);
     this.agents = new Map(data.agents);
     this.nextTaskNum = data.nextTaskNum;
+    if (data.project) {
+      data.project.createdAt = new Date(data.project.createdAt);
+      data.project.readyAt = data.project.readyAt ? new Date(data.project.readyAt) : data.project.createdAt;
+      this.project = data.project;
+    }
+    if (data.projectShortId) {
+      this.projectShortId = data.projectShortId;
+    }
     log.info(`Hydrated: ${this.tasks.size} tasks, ${this.agents.size} agents`);
   }
 
   // --- Task operations ---
 
   addTask(projectId: string, spec: TaskSpec): Task {
-    const id = `task-${String(this.nextTaskNum++).padStart(3, "0")}`;
+    const prefix = this.projectShortId ? `proj-${this.projectShortId}-task` : "task";
+    const id = `${prefix}-${String(this.nextTaskNum++).padStart(3, "0")}`;
     const now = new Date();
     const task: Task = {
       id,
@@ -233,7 +266,7 @@ export class TaskBoard extends EventEmitter {
 
   // --- Agent operations ---
 
-  registerAgent(name: string, capabilities: string[]): AgentInfo {
+  registerAgent(name: string, capabilities: string[], projectId?: string): AgentInfo {
     const id = `agent-${name.toLowerCase().replace(/\s+/g, "-")}-${Date.now().toString(36)}`;
     const agent: AgentInfo = {
       id,
@@ -241,6 +274,7 @@ export class TaskBoard extends EventEmitter {
       capabilities,
       joinedAt: new Date(),
       currentTaskId: null,
+      projectId: projectId || this.project?.id || "",
     };
     this.agents.set(id, agent);
     log.info(`Agent registered: ${id} (${name})`);
