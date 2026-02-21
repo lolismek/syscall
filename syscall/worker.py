@@ -36,15 +36,15 @@ def extract_code(text: str) -> str:
     return text.strip()
 
 
-def validate_locally(code: str, test_cases: list[dict], timeout: float = 10.0) -> bool:
-    """Run code against public test cases locally."""
+def validate_locally(code: str, test_cases: list[dict], timeout: float = 10.0) -> tuple[bool, str | None]:
+    """Run code against public test cases locally. Returns (passed, error_detail)."""
     full_code = code + "\n" + _HARNESS_SUFFIX
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(full_code)
         tmp_path = f.name
 
     try:
-        for tc in test_cases:
+        for i, tc in enumerate(test_cases):
             try:
                 result = subprocess.run(
                     [sys.executable, tmp_path],
@@ -54,20 +54,21 @@ def validate_locally(code: str, test_cases: list[dict], timeout: float = 10.0) -
                     timeout=timeout,
                 )
                 if result.returncode != 0:
-                    log.warning(f"  Local validation failed (exit {result.returncode}): {result.stderr[:200]}")
-                    return False
+                    err = result.stderr[:500]
+                    log.warning(f"  Local validation failed (exit {result.returncode}): {err[:200]}")
+                    return False, f"Runtime error on test case {i+1}: {err}"
                 actual = result.stdout.strip()
                 expected = tc["expected_output"].strip()
                 if json.loads(actual) != json.loads(expected):
                     log.warning(f"  Local validation wrong answer: got {actual}, expected {expected}")
-                    return False
+                    return False, f"Wrong answer on test case {i+1}: input={tc['input'][:200]}, expected={expected}, got={actual}"
             except subprocess.TimeoutExpired:
                 log.warning("  Local validation timed out")
-                return False
+                return False, f"Timeout on test case {i+1} (>{timeout}s)"
             except Exception as e:
                 log.warning(f"  Local validation error: {e}")
-                return False
-        return True
+                return False, f"Execution error on test case {i+1}: {e}"
+        return True, None
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -125,6 +126,36 @@ Here are the current top solutions and their execution times:
 ```"""
 
 
+def build_reflection_prompt(problem: dict, code: str, error: str) -> str:
+    return f"""You are an expert competitive programmer. Your previous solution has a bug. Fix it.
+
+**Problem:** {problem["title"]}
+{problem["description"]}
+
+**Function signature:** `{problem["function_signature"]}`
+
+**Your previous code:**
+```python
+{code}
+```
+
+**Error:**
+{error}
+
+Analyze the error, identify the root cause, and write a corrected solution.
+
+**Requirements:**
+- Define a function called `solve` with the exact signature above
+- Do NOT include any imports unless absolutely necessary
+- Do NOT include test code or print statements outside the function
+- Return ONLY the corrected function definition in a Python code block
+
+```python
+{problem["function_signature"]}
+    # your corrected code here
+```"""
+
+
 async def call_llm(api_url: str, model: str, api_key: str | None, prompt: str) -> str:
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -175,21 +206,31 @@ async def run_worker(server_url: str, api_url: str, model: str, api_key: str | N
                 else:
                     prompt = build_evolve_prompt(problem, msg["top_solutions"])
 
-                # Retry up to 3 times
+                test_cases = [tc.dict() if hasattr(tc, "dict") else tc for tc in problem["test_cases"]]
+                last_code = None
+                last_error = None
+
+                # Retry up to 3 times with self-reflection
                 for attempt in range(3):
                     try:
-                        log.info(f"  Attempt {attempt + 1}: calling LLM...")
+                        if attempt > 0 and last_code and last_error:
+                            log.info(f"  Attempt {attempt + 1}: reflecting on error...")
+                            prompt = build_reflection_prompt(problem, last_code, last_error)
+                        else:
+                            log.info(f"  Attempt {attempt + 1}: calling LLM...")
+
                         response = await call_llm(api_url, model, api_key, prompt)
                         code = extract_code(response)
 
                         if "def solve" not in code:
                             log.warning("  LLM response missing solve function, retrying...")
+                            last_code = code
+                            last_error = "Your response did not contain a valid `def solve(...)` function definition."
                             continue
 
-                        # Validate locally
-                        test_cases = [tc.dict() if hasattr(tc, "dict") else tc for tc in problem["test_cases"]]
                         log.info("  Validating locally...")
-                        if validate_locally(code, test_cases):
+                        passed, error = validate_locally(code, test_cases)
+                        if passed:
                             log.info("  Local validation passed! Submitting...")
                             await ws.send(json.dumps({
                                 "type": "submission",
@@ -199,10 +240,14 @@ async def run_worker(server_url: str, api_url: str, model: str, api_key: str | N
                             }))
                             break
                         else:
-                            log.warning(f"  Local validation failed (attempt {attempt + 1})")
+                            log.warning(f"  Local validation failed (attempt {attempt + 1}): {error}")
+                            last_code = code
+                            last_error = error
 
                     except Exception as e:
                         log.error(f"  Attempt {attempt + 1} error: {e}")
+                        last_code = None
+                        last_error = None
 
                 else:
                     log.warning(f"  All attempts failed for generation {generation}")

@@ -11,6 +11,7 @@ def main():
     parser.add_argument("--generations", type=int, default=10, help="Max generations")
     parser.add_argument("--top-k", type=int, default=3, help="Top K solutions to keep")
     parser.add_argument("--timeout", type=int, default=60, help="Generation timeout (seconds)")
+    parser.add_argument("--min-agents", type=int, default=1, help="Wait for N agents before starting")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8000, help="Bind port")
     args = parser.parse_args()
@@ -21,6 +22,7 @@ def main():
         max_generations=args.generations,
         top_k=args.top_k,
         generation_timeout=args.timeout,
+        min_agents=args.min_agents,
     )
 
     uvicorn.run("syscall.server:app", host=args.host, port=args.port, reload=True)

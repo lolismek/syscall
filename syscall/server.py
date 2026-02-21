@@ -34,6 +34,7 @@ CONFIG: dict[str, Any] = {
     "max_generations": 10,
     "top_k": 3,
     "generation_timeout": 60,
+    "min_agents": 1,
 }
 
 app = FastAPI(title="syscall")
@@ -49,11 +50,12 @@ dashboard_connections: list[WebSocket] = []
 # ── EvolutionManager ─────────────────────────────────────────────────────────
 
 class EvolutionManager:
-    def __init__(self, problem: Problem, top_k: int, max_generations: int, generation_timeout: float):
+    def __init__(self, problem: Problem, top_k: int, max_generations: int, generation_timeout: float, min_agents: int = 1):
         self.problem = problem
         self.top_k_count = top_k
         self.max_generations = max_generations
         self.generation_timeout = generation_timeout
+        self.min_agents = min_agents
 
         self.generation = 0
         self.phase: str = "waiting"
@@ -99,9 +101,10 @@ class EvolutionManager:
         # Wait for at least one agent
         self.phase = "waiting"
         await self.broadcast_state()
-        log.info("Waiting for agents to connect...")
-        while not agent_connections:
+        log.info(f"Waiting for {self.min_agents} agent(s) to connect...")
+        while len(agent_connections) < self.min_agents:
             await asyncio.sleep(0.5)
+            await self.broadcast_state()
 
         # Give a moment for additional agents
         await asyncio.sleep(2)
@@ -207,6 +210,7 @@ async def startup():
         top_k=CONFIG["top_k"],
         max_generations=CONFIG["max_generations"],
         generation_timeout=CONFIG["generation_timeout"],
+        min_agents=CONFIG["min_agents"],
     )
     asyncio.create_task(manager.run())
     log.info(f"Server started — problem={CONFIG['problem_name']}, generations={CONFIG['max_generations']}")
