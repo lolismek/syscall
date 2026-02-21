@@ -13,7 +13,7 @@ from urllib import request
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_NEMOTRON_MODEL = "deepseek-ai/DeepSeek-V3.2"
+DEFAULT_NEMOTRON_MODEL = "Qwen/Qwen3-Coder-480B-A35B-Instruct"
 DEFAULT_NVIDIA_API_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_DEEPINFRA_API_BASE_URL = "https://api.deepinfra.com/v1/openai"
 DEFAULT_PROVIDER = "deepinfra"

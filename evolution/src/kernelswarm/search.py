@@ -162,6 +162,7 @@ class SwarmSearchRunner:
         island_quick_frontier: dict[str, float | None] = {island.policy.island_id: None for island in islands}
         candidates_by_id: dict[str, Candidate] = {}
         seen_hashes: set[str] = set()
+        parent_failure_hints: dict[str, list[str]] = {}  # parent_id → [error summaries]
 
         run_id = str(uuid4())
         state = SearchState(run_id=run_id, iteration=0, accepted_updates=0, quick_scored=0, full_scored=0)
@@ -275,11 +276,16 @@ class SwarmSearchRunner:
                         generator = swarm.next_generator()
                         iteration = next_iteration
                         next_iteration += 1
+                        ctx = prompt_context
+                        hints = parent_failure_hints.get(parent.candidate_id)
+                        if hints:
+                            ctx = dict(prompt_context) if prompt_context else {}
+                            ctx["recent_failures"] = hints[:3]
                         future = proposal_exec.submit(
                             generator.propose,
                             parent=parent,
                             policy=island.policy,
-                            prompt_context=prompt_context,
+                            prompt_context=ctx,
                         )
                         proposal_futures[future] = (iteration, island.policy.island_id)
                         budget_exhausted = self._submission_budget_exhausted(
@@ -440,6 +446,15 @@ class SwarmSearchRunner:
                             full_median_us=None,
                             reason="quick_evaluated",
                         )
+
+                        # Track failure hints for the parent so future mutations avoid the same mistakes.
+                        if quick_fitness <= -1e17:
+                            hint = self._extract_failure_hint(eval_result)
+                            if hint and candidate.parent_ids:
+                                pid = candidate.parent_ids[0]
+                                bucket = parent_failure_hints.setdefault(pid, [])
+                                if len(bucket) < 3:
+                                    bucket.append(hint)
 
                         full_attempted = island_full_attempts.get(island_id, 0)
                         should_force_first = self.config.force_first_full_per_island and full_attempted == 0
@@ -1441,6 +1456,24 @@ class SwarmSearchRunner:
             attach_content_hashes(iteration_metric=metric)
             metrics.append(metric)
         store.save_iteration_metrics(metrics)
+
+    @staticmethod
+    def _extract_failure_hint(eval_result: CandidateEvaluation) -> str | None:
+        """Extract a short error summary from a failed evaluation."""
+        # Validation failures carry the richest info (compilation_error=..., correctness_issue=...).
+        vr = eval_result.validation_result
+        if vr is not None and vr.failing_cases:
+            return vr.failing_cases[0].summary[:200]
+        # Raw score reason (judge_rejected, build_failed, static_check_failed, remote_eval_error).
+        raw = eval_result.quick_score.raw_score
+        if isinstance(raw, dict):
+            reason = raw.get("reason", "")
+            error = raw.get("error", "")
+            if error:
+                return f"{reason}: {error}"[:200]
+            if reason:
+                return str(reason)[:200]
+        return None
 
     @staticmethod
     def _get_prompt_context(problem: OptimizationProblem) -> dict[str, Any] | None:

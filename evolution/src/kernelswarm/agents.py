@@ -233,6 +233,17 @@ OPTIMIZATION STRATEGIES (pick what fits the island style):
 - Use fast math intrinsics: __expf, rsqrtf, __fdividef
 - Leverage tensor cores via TF32 or FP16 accumulation where precision allows
 
+TRITON KERNEL CONSTRAINTS (follow these to avoid compilation errors):
+- Triton tensor numel limit is 1048576 — you MUST tile larger tensors into blocks, \
+do not load an entire tensor at once if its numel exceeds this limit
+- BLOCK_SIZE must be a power of 2, use triton.next_power_of_2() but cap at 1024
+- Use tl.constexpr for compile-time block size parameters in kernel signatures
+- Always mask with tl.arange(0, BLOCK_SIZE) < n_elements for non-power-of-2 sizes
+- Each Triton kernel program handles one tile/row via tl.program_id(0) — launch grid must cover all programs
+- Weight and bias parameters must be loaded from pointers passed as arguments, never captured as closures
+- When processing a tensor of shape (M, N), iterate over N in BLOCK_SIZE chunks inside the kernel, \
+do NOT try to load all N elements at once if N could exceed 1048576
+
 Do not include markdown fences. Return only the JSON object."""
 
 _KB_USER_TEMPLATE = """\
@@ -357,6 +368,16 @@ class GeneratorAgent:
             mutation_scale=policy.mutation_scale,
             style_guidance=style_guidance,
         ) + diversity_hint
+
+        # Append failure feedback so the LLM avoids repeating the same mistakes.
+        recent_failures = ctx.get("recent_failures", [])
+        if recent_failures:
+            failure_lines = "\n".join(f"- {str(f)[:200]}" for f in recent_failures[:3])
+            user_prompt += (
+                "\n=== RECENT FAILURES (from mutations of this parent — avoid these mistakes) ===\n"
+                + failure_lines
+                + "\n"
+            )
 
         # KernelBench needs enough tokens for full kernel source.
         # High temperature for diversity — dedup filter catches repeats.
