@@ -5,4 +5,6 @@ export const config = {
   workspacePath: process.env.WORKSPACE_PATH || path.resolve(process.cwd(), "workspace"),
   model: process.env.MODEL || "claude-4-sonnet-20250514",
   maxConcurrentAgents: 10,
+  taskTimeoutMs: parseInt(process.env.TASK_TIMEOUT_MS || String(15 * 60 * 1000), 10),
+  agentApiKey: process.env.AGENT_API_KEY || null,
 };

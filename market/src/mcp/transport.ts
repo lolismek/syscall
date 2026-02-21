@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { McpServerFactory } from "./server.js";
 import type { TaskBoard } from "../state/task-board.js";
 import type { ProjectStore } from "../state/project-store.js";
+import { config } from "../utils/config.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("Transport");
@@ -17,6 +18,18 @@ export function createTransport(
   // transport needs the raw body to parse JSON-RPC itself. Only parse JSON
   // on non-MCP routes.
   const jsonParser = express.json();
+
+  // Auth middleware for /mcp routes
+  if (config.agentApiKey) {
+    app.use("/mcp", (req, res, next) => {
+      const auth = req.headers.authorization;
+      if (!auth || auth !== `Bearer ${config.agentApiKey}`) {
+        res.status(401).json({ error: "Unauthorized. Provide Authorization: Bearer <AGENT_API_KEY> header." });
+        return;
+      }
+      next();
+    });
+  }
 
   // Map of sessionId -> transport for multi-session support
   const transports = new Map<string, StreamableHTTPServerTransport>();

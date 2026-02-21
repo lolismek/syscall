@@ -128,6 +128,22 @@ export async function planProject(
     createdTasks[i].spec.dependencies = resolved;
   }
 
+  // Cycle detection — break any circular dependencies
+  let cycleCheck = taskBoard.hasCyclicDependencies();
+  while (cycleCheck.hasCycle && cycleCheck.cycle) {
+    const cycle = cycleCheck.cycle;
+    log.warn(`Circular dependency detected: ${cycle.join(" → ")}. Breaking cycle.`);
+    // Remove the back-edge: last dependency link in the cycle
+    const targetId = cycle[cycle.length - 2]; // task that has the offending dep
+    const depId = cycle[cycle.length - 1];     // the dep that creates the cycle
+    const target = taskBoard.getTask(targetId);
+    if (target) {
+      target.spec.dependencies = target.spec.dependencies.filter((d) => d !== depId);
+      log.warn(`Removed dependency ${depId} from ${targetId}`);
+    }
+    cycleCheck = taskBoard.hasCyclicDependencies();
+  }
+
   const tasks: TaskSpec[] = createdTasks.map((t) => t.spec);
 
   log.info(`Project planned: ${plan.projectName}, ${tasks.length} tasks created`);

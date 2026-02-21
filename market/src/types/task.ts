@@ -25,6 +25,7 @@ export interface Task {
   branch: string | null;
   submissionDiff: string | null;
   validationFeedback: string | null;
+  lastActivityAt: Date;
   createdAt: Date;
   updatedAt: Date;
 }

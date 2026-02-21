@@ -79,6 +79,11 @@ function createMcpServer(
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Unknown agent" }) }] };
       }
 
+      // Touch current task as proof of life
+      if (agent.currentTaskId) {
+        taskBoard.touchTask(agent.currentTaskId);
+      }
+
       // If agent already has a task, return it
       if (agent.currentTaskId) {
         const current = taskBoard.getTask(agent.currentTaskId);
@@ -157,6 +162,7 @@ function createMcpServer(
       if (!task || task.assignedTo !== agent_id) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Task not found or not assigned to you" }) }] };
       }
+      taskBoard.touchTask(task_id);
       if (status === "in_progress") {
         taskBoard.updateTaskStatus(task_id, "in_progress");
       }
@@ -178,6 +184,7 @@ function createMcpServer(
       if (!task || task.assignedTo !== agent_id) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Task not found or not assigned to you" }) }] };
       }
+      taskBoard.touchTask(task_id);
       const updates: Record<string, unknown> = {
         taskStatus: task.status,
       };
@@ -203,6 +210,23 @@ function createMcpServer(
       }
       if (!task.branch) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: "No branch assigned" }) }] };
+      }
+
+      taskBoard.touchTask(task_id);
+
+      // Branch verification — check branch exists and has commits before diffing
+      const exists = await gitRepo.branchExists(task.branch);
+      if (!exists) {
+        const feedback = `Branch not found: ${task.branch}. Make sure you pushed your branch to the repo.`;
+        taskBoard.updateTaskStatus(task_id, "rejected", feedback);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ error: feedback }) }] };
+      }
+
+      const hasCommits = await gitRepo.branchHasCommits(task.branch);
+      if (!hasCommits) {
+        const feedback = `Branch ${task.branch} has no commits ahead of main. Make sure you committed and pushed your changes.`;
+        taskBoard.updateTaskStatus(task_id, "rejected", feedback);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ error: feedback }) }] };
       }
 
       // Worker has pushed their branch — diff against it in our repo

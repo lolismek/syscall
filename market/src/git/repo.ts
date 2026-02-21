@@ -99,6 +99,24 @@ export class GitRepo {
     return output.split("\n").filter(Boolean);
   }
 
+  async branchExists(branchName: string): Promise<boolean> {
+    try {
+      await this.git("rev-parse", "--verify", branchName);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async branchHasCommits(branchName: string): Promise<boolean> {
+    try {
+      const output = await this.git("log", `main..${branchName}`, "--oneline");
+      return output.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   getRepoPath(): string {
     return this.repoPath;
   }
