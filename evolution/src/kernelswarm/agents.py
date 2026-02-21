@@ -217,9 +217,10 @@ CRITICAL RULES:
 - ModelNew.forward must accept the same inputs and return the same outputs
 - ModelNew MUST have the same learnable parameters (weight, bias, etc.) as the reference Model \
 with the same shapes — dropping or ignoring learnable parameters is NOT allowed
-- All valid approaches are welcome: torch.compile, custom CUDA kernels via \
-torch.utils.cpp_extension.load_inline, Triton kernels, optimized PyTorch operations, \
-or any combination
+- Write actual custom kernels: custom CUDA kernels via \
+torch.utils.cpp_extension.load_inline, Triton kernels, or optimized PyTorch operations
+- Do NOT use torch.compile — it is a black-box compiler, not a custom kernel optimization. \
+The goal is to write explicit, hand-optimized GPU code.
 - All imports must be at the top of the file
 - Do not use try/except blocks
 
@@ -253,10 +254,9 @@ _KB_USER_TEMPLATE = """\
 === CURRENT CANDIDATE (your starting point — improve this, keep what works) ===
 {candidate_source}
 
-IMPORTANT: If the current candidate uses torch.compile, that is a STRONG baseline (often 3-5x faster \
-than naive PyTorch). Do NOT throw it away and rewrite from scratch. Instead, build on it — try \
-combining torch.compile with custom Triton kernels for specific ops, or replace only the bottleneck \
-ops with fused CUDA kernels while keeping torch.compile for the rest.
+IMPORTANT: Write actual custom GPU kernels (Triton or CUDA). Do NOT use torch.compile — \
+it is banned. Focus on fusing operations, reducing memory traffic, and writing efficient \
+Triton or CUDA kernels that replace the PyTorch ops in the reference model.
 
 === CONTEXT ===
 Hardware: {hardware}

@@ -266,6 +266,8 @@ class KernelBenchProblem(OptimizationProblem):
             reasons.append("candidate source cannot be empty")
         if "ModelNew" not in source:
             reasons.append("candidate source must define ModelNew")
+        if "torch.compile" in source:
+            reasons.append("torch.compile is banned — write actual custom kernels")
 
         if self.config.backend not in _ALLOWED_BACKENDS:
             reasons.append(f"unsupported kernelbench backend: {self.config.backend}")
