@@ -1,0 +1,82 @@
+name: "mamba_selective_scan"
+problem_id: "selective_scan_fwd"
+description: "Mamba selective scan forward pass (S6 SSM) in fp32"
+optimization_hints: >
+  Use block-level tiling with CUB block load/store for coalesced memory access.
+  Process seqlen in chunks with warp-level prefix scans and running prefix state.
+  Stage A, B, C into shared memory; reuse a single shared memory allocation
+  across load, scan, and store phases via pointer casting.
+  Thread-level parallelism: each thread processes kNItems elements (4-16)
+  along the sequence dimension. Consider split across dim with one block per row.
+  delta_softplus fusion avoids a separate kernel launch.
+  For fp16/bf16 inputs, accumulate the scan in fp32 for numerical stability.
+
+ref_source: |
+  import torch
+  import torch.nn as nn
+
+  class Model(nn.Module):
+      def __init__(self, dim: int = 768, dstate: int = 16, delta_softplus: bool = True):
+          super().__init__()
+          self.dim = dim
+          self.dstate = dstate
+          self.delta_softplus = delta_softplus
+          # Fixed parameters
+          self.A = nn.Parameter(torch.randn(dim, dstate))
+          self.D = nn.Parameter(torch.randn(dim))
+          self.delta_bias = nn.Parameter(torch.randn(dim))
+
+      def forward(self, u: torch.Tensor, delta: torch.Tensor,
+                  B: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
+          """
+          Selective scan forward pass.
+          u:     (batch, dim, seqlen) - input
+          delta: (batch, dim, seqlen) - time step
+          B:     (batch, dstate, seqlen) - input-dependent state transition
+          C:     (batch, dstate, seqlen) - input-dependent output projection
+          Returns: (batch, dim, seqlen) - output
+          """
+          batch, dim, seqlen = u.shape
+          dstate = self.dstate
+
+          # Apply delta softplus
+          if self.delta_softplus:
+              delta = torch.nn.functional.softplus(delta + self.delta_bias.unsqueeze(0).unsqueeze(-1))
+          else:
+              delta = delta + self.delta_bias.unsqueeze(0).unsqueeze(-1)
+
+          # Discretize: deltaA = exp(delta * A), deltaB_u = delta * B * u
+          A = self.A  # (dim, dstate)
+          deltaA = torch.exp(delta.unsqueeze(-2) * A.unsqueeze(0).unsqueeze(-1))
+          # deltaA: (batch, dim, dstate, seqlen)
+          deltaB_u = (delta.unsqueeze(-2) * B.unsqueeze(1) * u.unsqueeze(-2))
+          # deltaB_u: (batch, dim, dstate, seqlen)
+
+          # Sequential scan over seqlen
+          x = torch.zeros(batch, dim, dstate, device=u.device, dtype=u.dtype)
+          ys = []
+          for t in range(seqlen):
+              x = deltaA[..., t] * x + deltaB_u[..., t]
+              y = (x * C[:, None, :, t:t+1]).sum(dim=-1)  # (batch, dim)
+              ys.append(y)
+          y = torch.stack(ys, dim=-1)  # (batch, dim, seqlen)
+
+          # D skip connection
+          y = y + self.D.unsqueeze(0).unsqueeze(-1) * u
+          return y
+
+  def get_inputs():
+      batch, dim, seqlen, dstate = 8, 768, 2048, 16
+      u = torch.randn(batch, dim, seqlen, device='cuda')
+      delta = torch.randn(batch, dim, seqlen, device='cuda')
+      B = torch.randn(batch, dstate, seqlen, device='cuda')
+      C = torch.randn(batch, dstate, seqlen, device='cuda')
+      return [u, delta, B, C]
+
+  def get_init_inputs():
+      return [768, 16, True]
+
+backend: "cuda"
+precision: "fp32"
+quick_perf_trials: 4
+full_perf_trials: 20

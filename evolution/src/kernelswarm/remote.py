@@ -333,9 +333,12 @@ class EvalWorkerService:
         with self._lock:
             if cache_key in self._problems:
                 return self._problems[cache_key]
-            if problem_id not in self._problem_factories:
+            factory_key = problem_id
+            if factory_key not in self._problem_factories and problem_id.startswith("yaml:"):
+                factory_key = "yaml_problem"
+            if factory_key not in self._problem_factories:
                 raise KeyError(f"unknown problem_id: {problem_id}")
-            problem = self._problem_factories[problem_id](problem_config)
+            problem = self._problem_factories[factory_key](problem_config)
             self._problems[cache_key] = problem
             return problem
 
