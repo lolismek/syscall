@@ -6,10 +6,11 @@ export function getStyles(port: number): string {
 
   :root {
     --bg: #09090b;
-    --surface: #18181b;
-    --surface-2: #27272a;
+    --surface: rgba(24, 24, 27, 0.55);
+    --surface-solid: #18181b;
+    --surface-2: rgba(39, 39, 42, 0.5);
     --border: #3f3f46;
-    --border-subtle: #27272a;
+    --border-subtle: rgba(63, 63, 70, 0.5);
     --text: #fafafa;
     --text-secondary: #a1a1aa;
     --muted: #71717a;
@@ -25,12 +26,13 @@ export function getStyles(port: number): string {
     --orange: #f97316;
     --purple: #a855f7;
     --purple-dim: #a855f722;
-    --radius: 12px;
-    --radius-sm: 8px;
-    --radius-xs: 6px;
-    --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
-    --shadow-lg: 0 4px 12px rgba(0,0,0,0.4);
+    --radius: 0px;
+    --radius-sm: 0px;
+    --radius-xs: 0px;
+    --shadow: none;
+    --shadow-lg: 0 4px 12px rgba(0,0,0,0.3);
     --transition: all 0.2s ease;
+    --glass: blur(12px) saturate(1.2);
   }
 
   body {
@@ -42,7 +44,7 @@ export function getStyles(port: number): string {
     -webkit-font-smoothing: antialiased;
   }
 
-  .container { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px 24px; position: relative; z-index: 1; }
 
   code, .mono {
     font-family: 'JetBrains Mono', 'SF Mono', monospace;
@@ -52,11 +54,12 @@ export function getStyles(port: number): string {
   /* ===== Hero Header ===== */
   .hero {
     background: var(--surface);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius);
     padding: 20px 24px 0;
     margin-bottom: 20px;
-    box-shadow: var(--shadow);
   }
   .hero-top {
     display: flex;
@@ -158,11 +161,12 @@ export function getStyles(port: number): string {
   /* ===== Panels ===== */
   .panel {
     background: var(--surface);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius);
     padding: 20px;
     margin-bottom: 16px;
-    box-shadow: var(--shadow);
     transition: var(--transition);
   }
   .panel-title {
@@ -237,7 +241,7 @@ export function getStyles(port: number): string {
   .create-form { display: flex; gap: 10px; margin-bottom: 12px; align-items: flex-start; }
   .create-input {
     flex: 1;
-    background: var(--bg);
+    background: rgba(9, 9, 11, 0.6);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -311,7 +315,9 @@ export function getStyles(port: number): string {
   /* ===== Project Cards ===== */
   .projects-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 12px; }
   .project-card {
-    background: var(--bg);
+    background: rgba(9, 9, 11, 0.5);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius);
     padding: 20px;
@@ -323,8 +329,7 @@ export function getStyles(port: number): string {
   }
   .project-card:hover {
     border-color: var(--accent);
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-lg);
+    background: rgba(9, 9, 11, 0.65);
   }
   .project-card-left { flex: 1; min-width: 0; }
   .project-card-name {
@@ -380,7 +385,9 @@ export function getStyles(port: number): string {
   @media (max-width: 900px) { .guide-grid { grid-template-columns: 1fr; } }
 
   .guide-card {
-    background: var(--bg);
+    background: rgba(9, 9, 11, 0.5);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius);
     padding: 20px;
@@ -475,6 +482,8 @@ export function getStyles(port: number): string {
   /* ===== Integration Header & Tabs ===== */
   .integration-header {
     background: var(--surface);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius);
     padding: 24px;
@@ -509,6 +518,8 @@ export function getStyles(port: number): string {
     display: flex;
     gap: 0;
     background: var(--surface);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--border-subtle);
     border-top: none;
     border-radius: 0 0 var(--radius) var(--radius);
@@ -603,7 +614,7 @@ export function getStyles(port: number): string {
 
   /* Live projects mini cards */
   .live-project-card {
-    background: var(--surface);
+    background: rgba(24, 24, 27, 0.5);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     padding: 12px 16px;
@@ -688,7 +699,9 @@ export function getStyles(port: number): string {
   /* ===== Agents ===== */
   .agents-grid { display: flex; gap: 10px; flex-wrap: wrap; }
   .agent-card {
-    background: var(--bg);
+    background: rgba(9, 9, 11, 0.5);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     padding: 14px 16px;
@@ -729,7 +742,9 @@ export function getStyles(port: number): string {
     gap: 12px;
   }
   .kanban-column {
-    background: var(--bg);
+    background: rgba(9, 9, 11, 0.45);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     padding: 12px;
@@ -755,7 +770,7 @@ export function getStyles(port: number): string {
     font-weight: 500;
   }
   .kanban-card {
-    background: var(--surface);
+    background: rgba(24, 24, 27, 0.5);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     padding: 10px 12px;
@@ -879,6 +894,25 @@ export function getStyles(port: number): string {
 
   .broken-dep { color: var(--red); font-weight: 600; }
 
+  /* ===== Ambient Background ===== */
+  .ambient-bg {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 0;
+  }
+  .ambient-bg video {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    min-width: 100%;
+    min-height: 100%;
+    transform: translate(-50%, -50%);
+    object-fit: cover;
+    opacity: 0.25;
+  }
+
   /* ===== Animations ===== */
   @keyframes fadeIn {
     from { opacity: 0; transform: translateY(8px); }
@@ -911,8 +945,10 @@ export function getStyles(port: number): string {
     gap: 16px;
     padding: 20px 24px;
     background: var(--surface);
+    backdrop-filter: var(--glass);
+    -webkit-backdrop-filter: var(--glass);
     border: 1px solid var(--yellow-dim);
-    border-radius: 12px;
+    border-radius: var(--radius);
     margin-bottom: 20px;
   }
   .planning-spinner {
@@ -937,7 +973,7 @@ export function getStyles(port: number): string {
   .skeleton-card {
     background: var(--surface);
     border: 1px solid var(--border-subtle);
-    border-radius: 10px;
+    border-radius: var(--radius);
     padding: 16px;
     margin-bottom: 10px;
   }

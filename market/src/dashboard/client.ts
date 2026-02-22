@@ -741,5 +741,6 @@ async function tick() {
 // Initial load
 fetchProjects();
 setInterval(tick, 3000);
+
 `;
 }

@@ -16,6 +16,9 @@ ${getStyles(config.port)}
 </style>
 </head>
 <body>
+<div class="ambient-bg">
+  <video autoplay muted loop playsinline preload="auto" src="/public/ambient-wave.mp4"></video>
+</div>
 <div class="container">
 ${getHeroHtml()}
 ${getProjectsViewHtml()}

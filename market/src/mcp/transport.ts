@@ -1,4 +1,6 @@
 import express from "express";
+import path from "path";
+import { fileURLToPath } from "url";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServerFactory, SessionContext } from "./server.js";
 import type { ProjectRegistry } from "../state/project-registry.js";
@@ -248,6 +250,10 @@ export function createTransport(
       }
     }
   });
+
+  // --- Static assets (public/) ---
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  app.use("/public", express.static(path.resolve(__dirname, "../../public")));
 
   // --- GET / --- Serve the dashboard
   app.get("/", (_req, res) => {
