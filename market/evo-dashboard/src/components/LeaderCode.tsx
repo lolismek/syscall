@@ -58,7 +58,7 @@ export default function LeaderCode({ leader }: Props) {
   }, [code]);
 
   return (
-    <div className="bg-surface-50 border border-surface-200 rounded-xl overflow-hidden">
+    <div className="bg-surface-50 backdrop-blur-xl border border-surface-200 rounded-xl overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-surface-200">
         <div className="flex items-center gap-3">
           <h3 className="text-sm font-semibold text-cuda">

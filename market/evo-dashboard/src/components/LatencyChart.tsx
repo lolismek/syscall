@@ -134,7 +134,7 @@ export default function LatencyChart({ data, problemId }: Props) {
   }, [bucketData, logScale]);
 
   return (
-    <div className="bg-surface-50 border border-surface-200 rounded-xl p-4">
+    <div className="bg-surface-50 backdrop-blur-xl border border-surface-200 rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-gray-400">
           Eval Latency Over Time (per minute)

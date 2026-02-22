@@ -84,10 +84,10 @@ export default function KpiBar({ overview, timeseries }: Props) {
       {kpis.map((kpi) => (
         <div
           key={kpi.label}
-          className="bg-surface-50 border border-surface-200 rounded-xl px-3 py-2.5"
+          className="bg-surface-50 backdrop-blur-xl border border-surface-200 rounded-xl px-3 py-2.5 flex flex-col items-center justify-center text-center min-h-[64px]"
         >
           <div
-            className={`text-lg font-bold tabular-nums ${kpi.color ?? "text-white"}`}
+            className={`text-lg font-bold tabular-nums leading-tight break-words w-full ${kpi.color ?? "text-white"}`}
           >
             {kpi.value}
           </div>

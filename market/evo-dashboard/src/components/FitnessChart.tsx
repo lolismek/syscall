@@ -20,7 +20,7 @@ export default function FitnessChart({ data, problemId }: Props) {
   const refs = getReferences(problemId);
 
   return (
-    <div className="bg-surface-50 border border-surface-200 rounded-xl p-4">
+    <div className="bg-surface-50 backdrop-blur-xl border border-surface-200 rounded-xl p-4">
       <h3 className="text-sm font-semibold text-gray-400 mb-3">
         Best Fitness Over Iterations
       </h3>

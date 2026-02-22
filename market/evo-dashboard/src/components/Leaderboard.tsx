@@ -18,7 +18,7 @@ function readMetric(rawScore: Record<string, unknown>, key: string): number | nu
 
 export default function Leaderboard({ title, rows }: Props) {
   return (
-    <div className="bg-surface-50 border border-surface-200 rounded-xl p-4">
+    <div className="bg-surface-50 backdrop-blur-xl border border-surface-200 rounded-xl p-4">
       <h3 className="text-sm font-semibold text-gray-400 mb-3">{title}</h3>
       <div className="overflow-x-auto">
         <table className="w-full text-xs">

@@ -75,59 +75,79 @@ export default function App() {
   usePolling(refresh, 2000);
 
   return (
-    <div className="min-h-screen bg-[#09090b]">
-      <Header
-        runs={runs}
-        activeRunId={activeRunId}
-        onRunChange={setActiveRunId}
-        overview={overview}
-        lastRefresh={lastRefresh}
-      />
+    <div className="min-h-screen" style={{ background: "#09090b" }}>
+      {/* Ambient video background — same as market dashboard */}
+      <div className="ambient-bg">
+        <video
+          autoPlay
+          muted
+          loop
+          playsInline
+          preload="auto"
+          src="/public/ambient-wave.mp4"
+        />
+      </div>
 
-      <main className="mx-auto max-w-[1600px] px-4 py-5 space-y-5">
-        {overview && timeseries && (
-          <KpiBar overview={overview} timeseries={timeseries} />
-        )}
+      {/* Main content */}
+      <div
+        style={{
+          maxWidth: 1400,
+          margin: "0 auto",
+          padding: "20px 24px",
+          position: "relative",
+          zIndex: 1,
+        }}
+      >
+        <Header
+          overview={overview}
+          lastRefresh={lastRefresh}
+        />
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          {timeseries && overview && (
-            <>
-              <FitnessChart
-                data={timeseries.global}
-                problemId={overview.problem_id}
-              />
-              <LatencyChart
-                data={timeseries.global}
-                problemId={overview.problem_id}
-              />
-            </>
+        <div className="space-y-4">
+          {overview && timeseries && (
+            <KpiBar overview={overview} timeseries={timeseries} />
           )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {timeseries && overview && (
+              <>
+                <FitnessChart
+                  data={timeseries.global}
+                  problemId={overview.problem_id}
+                />
+                <LatencyChart
+                  data={timeseries.global}
+                  problemId={overview.problem_id}
+                />
+              </>
+            )}
+          </div>
+
+          {leaderSource && leaderSource.candidate_id && (
+            <LeaderCode leader={leaderSource} />
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {timeseries && (
+              <TokenChart data={timeseries.global} />
+            )}
+            {states && (
+              <StateTable states={states} />
+            )}
+            {timeseries && (
+              <div className="bg-surface-50 backdrop-blur-xl border border-surface-200 rounded-xl p-4 flex flex-col">
+                <h3 className="text-sm font-semibold text-gray-400 mb-3">Island Coverage</h3>
+                <IslandGrid islands={timeseries.islands} />
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Leaderboard title="Quick Leaderboard" rows={quickBoard} />
+            <Leaderboard title="Full Leaderboard" rows={fullBoard} />
+          </div>
         </div>
-
-        {leaderSource && leaderSource.candidate_id && (
-          <LeaderCode leader={leaderSource} />
-        )}
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-          {timeseries && (
-            <TokenChart data={timeseries.global} />
-          )}
-          {states && (
-            <StateTable states={states} />
-          )}
-          {timeseries && (
-            <div className="bg-surface-50 border border-surface-200 rounded-xl p-4">
-              <h3 className="text-sm font-semibold text-gray-400 mb-3">Island Coverage</h3>
-              <IslandGrid islands={timeseries.islands} />
-            </div>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <Leaderboard title="Quick Leaderboard" rows={quickBoard} />
-          <Leaderboard title="Full Leaderboard" rows={fullBoard} />
-        </div>
-      </main>
+      </div>
     </div>
   );
 }

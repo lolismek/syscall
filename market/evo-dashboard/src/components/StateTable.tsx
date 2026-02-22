@@ -20,11 +20,11 @@ export default function StateTable({ states }: Props) {
   const total = entries.reduce((sum, [, count]) => sum + count, 0);
 
   return (
-    <div className="bg-surface-50 border border-surface-200 rounded-xl p-4">
+    <div className="bg-surface-50 backdrop-blur-xl border border-surface-200 rounded-xl p-4 flex flex-col">
       <h3 className="text-sm font-semibold text-gray-400 mb-3">
         Candidate States
       </h3>
-      <div className="space-y-2">
+      <div className="space-y-1.5 flex-1 flex flex-col justify-center">
         {entries.map(([state, count]) => {
           const pct = total > 0 ? (count / total) * 100 : 0;
           return (
@@ -35,7 +35,7 @@ export default function StateTable({ states }: Props) {
                 </span>
                 <span className="text-gray-500 tabular-nums">{count}</span>
               </div>
-              <div className="h-1.5 w-full bg-surface-200 rounded-full overflow-hidden">
+              <div className="h-1 w-full bg-surface-200 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-accent/60 rounded-full transition-all duration-500"
                   style={{ width: `${pct}%` }}
