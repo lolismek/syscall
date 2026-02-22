@@ -135,7 +135,7 @@ export function createTransport(
     // Evolution mode — spawn evolution processes instead of normal project
     if (useEvolution) {
       try {
-        const { evolutionRunId, dashboardPort } = startEvolutionRun(idea);
+        const { evolutionRunId, dashboardPort } = await startEvolutionRun(idea);
         log.info(`Started evolution run ${evolutionRunId} on port ${dashboardPort} for prompt: ${idea.slice(0, 80)}`);
         res.status(201).json({ evolutionRunId, dashboardPort });
       } catch (err) {

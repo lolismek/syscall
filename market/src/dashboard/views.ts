@@ -6,7 +6,7 @@ export function getHeroHtml(): string {
     <div class="hero-top">
       <div class="hero-brand">
         <div>
-          <div class="hero-title">Syscall Market</div>
+          <div class="hero-title">Syscall</div>
           <div class="hero-subtitle">Multi-agent code orchestrator</div>
         </div>
       </div>

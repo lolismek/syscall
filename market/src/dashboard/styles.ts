@@ -1,6 +1,6 @@
 export function getStyles(port: number): string {
   return `
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -36,7 +36,7 @@ export function getStyles(port: number): string {
   }
 
   body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: 'IBM Plex Mono', monospace;
     background: var(--bg);
     color: var(--text);
     font-size: 14px;
@@ -47,7 +47,7 @@ export function getStyles(port: number): string {
   .container { max-width: 1400px; margin: 0 auto; padding: 20px 24px; position: relative; z-index: 1; }
 
   code, .mono {
-    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    font-family: 'IBM Plex Mono', monospace;
     font-size: 0.9em;
   }
 
