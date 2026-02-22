@@ -8,7 +8,7 @@ export interface Project {
   readyAt: Date;
   recruitingUntil: Date | null;
   minAgents: number;
-  status: "planning" | "recruiting" | "active" | "completed";
+  status: "planning" | "recruiting" | "active" | "completed" | "stopped";
   githubRepoUrl: string | null;
   githubRepoName: string | null;
   niaRepoId?: string;

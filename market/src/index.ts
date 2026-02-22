@@ -122,6 +122,10 @@ async function main() {
     if (existing.length > 0) {
       log.info(`Hydrated ${existing.length} existing project(s)`);
       for (const ctx of existing) {
+        if (ctx.project.status === "stopped") {
+          log.info(`Skipping stopped project: ${ctx.project.id}`);
+          continue;
+        }
         // Re-wire validation handlers for hydrated projects
         wireValidation(ctx);
       }
@@ -149,6 +153,7 @@ async function main() {
   // Recruiting phase timer — check every 5s for projects ready to transition
   setInterval(() => {
     for (const ctx of registry.list()) {
+      if (ctx.project.status === "stopped") continue;
       if (ctx.project.status !== "recruiting") continue;
       if (!ctx.project.recruitingUntil) continue;
       const until = new Date(ctx.project.recruitingUntil).getTime();
@@ -165,6 +170,7 @@ async function main() {
   // Task timeout sweep — check every 60s for timed-out tasks across all projects
   setInterval(() => {
     for (const ctx of registry.list()) {
+      if (ctx.project.status === "stopped") continue;
       const timedOut = ctx.taskBoard.getTimedOutTasks(config.taskTimeoutMs);
       for (const task of timedOut) {
         log.warn(`Task ${task.id} timed out (agent ${task.assignedTo} inactive for >${config.taskTimeoutMs}ms). Reassigning.`);

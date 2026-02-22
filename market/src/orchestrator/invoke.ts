@@ -17,7 +17,7 @@ export async function invokeOrchestrator(prompt: string): Promise<string> {
       customSystemPrompt: SYSTEM_PROMPT,
       model: config.model,
       allowedTools: [],
-      maxTurns: 3,
+      maxTurns: 20,
       permissionMode: "bypassPermissions",
       env: {
         ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || "",
@@ -45,6 +45,7 @@ export async function invokeOrchestrator(prompt: string): Promise<string> {
           result = message.result;
         } else {
           log.error(`Orchestrator error: ${message.subtype}`, message as unknown as Record<string, unknown>);
+          throw new Error(`Orchestrator returned non-success result: ${message.subtype}`);
         }
       }
     }

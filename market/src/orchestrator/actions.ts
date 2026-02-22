@@ -12,6 +12,9 @@ import { NiaClient } from "../knowledge/nia-client.js";
 
 const log = createLogger("Actions");
 
+/** Track merges per project so we only re-index every 5th merge */
+const mergeCounters = new Map<string, number>();
+
 interface PlanResponse {
   projectName: string;
   scaffold: ScaffoldFile[];
@@ -32,12 +35,14 @@ interface ValidationResponse {
 }
 
 function extractJson(text: string): string {
-  // Try to extract JSON from the response — handle markdown fences
-  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (fenceMatch) return fenceMatch[1].trim();
-  // Try raw JSON
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (jsonMatch) return jsonMatch[0];
+  // Find the first '{' and last '}' to extract the outermost JSON object.
+  // This avoids issues with nested markdown fences (e.g. ```bash inside README content)
+  // that break regex-based fence extraction.
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    return text.slice(firstBrace, lastBrace + 1);
+  }
   return text;
 }
 
@@ -229,37 +234,44 @@ export async function validateSubmission(
       // only exists on the remote, not locally
       const mergeRef = githubClient ? `origin/${task.branch}` : task.branch;
       try {
+        log.info(`Merging branch ${mergeRef} into main for task ${taskId}...`);
         await gitRepo.mergeBranch(mergeRef);
-        log.info(`Merged branch ${mergeRef} to main`);
+        log.info(`MERGE OK — ${mergeRef} merged to main (task ${taskId}: "${task.spec.title}")`);
 
         // Push to GitHub if configured
         if (githubClient) {
           try {
             await gitRepo.push("origin", "main");
-            log.info("Pushed merge to GitHub");
+            log.info(`PUSH OK — main pushed to GitHub (task ${taskId})`);
           } catch (err) {
-            log.warn(`Failed to push to GitHub: ${err}`);
+            log.warn(`PUSH FAILED for task ${taskId}: ${err}`);
           }
         }
       } catch (err) {
-        log.error(`Failed to merge branch ${task.branch}: ${err}`);
+        log.error(`MERGE FAILED — ${task.branch} (task ${taskId}): ${err}`);
         const feedback = `Merge conflict. Please rebase your branch on main and resubmit. Error: ${err}`;
         taskBoard.updateTaskStatus(taskId, "rejected", feedback);
         return { accepted: false, feedback };
       }
     }
     taskBoard.updateTaskStatus(taskId, "accepted", validation.feedback);
-    log.info(`Task ${taskId} ACCEPTED`);
+    log.info(`Task ${taskId} ACCEPTED — "${task.spec.title}"`);
 
-    // Fire-and-forget: re-index the project repo so later workers see merged code
+    // Re-index project repo every 5 merges so Nia stays reasonably fresh
     const project = taskBoard.getProject();
     if (project?.niaRepoId && config.niaApiKey) {
-      const nia = new NiaClient(config.niaApiKey);
-      nia.indexRepoAsync(project.niaRepoId);
+      const projectId = project.id;
+      const count = (mergeCounters.get(projectId) ?? 0) + 1;
+      mergeCounters.set(projectId, count);
+      if (count % 5 === 0) {
+        log.info(`Re-indexing project repo in Nia (merge #${count})`);
+        const nia = new NiaClient(config.niaApiKey);
+        nia.indexRepoAsync(project.niaRepoId);
+      }
     }
   } else {
     taskBoard.updateTaskStatus(taskId, "rejected", validation.feedback);
-    log.info(`Task ${taskId} REJECTED: ${validation.feedback}`);
+    log.info(`Task ${taskId} REJECTED — "${task.spec.title}": ${validation.feedback}`);
   }
 
   return {

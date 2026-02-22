@@ -64,30 +64,16 @@ export async function createProject(
     }
   }
 
-  // Fire-and-forget: index repo and dependency docs via Nia
+  // Fire-and-forget: index the project's GitHub repo via Nia.
+  // We only index the project repo itself — common dependencies (express, cors, etc.)
+  // are already in Nia's global index and searchable without explicit indexing.
   let niaRepoId: string | undefined;
   const niaSourceIds: string[] = [];
   if (config.niaApiKey && githubRepoName && config.githubOrg) {
     const nia = new NiaClient(config.niaApiKey);
-
-    // Index the project's GitHub repo
     niaRepoId = `${config.githubOrg}/${githubRepoName}`;
     nia.indexRepoAsync(niaRepoId);
-
-    // Index dependency docs from scaffold's package.json
-    const pkgFile = plan.scaffold.find((f) => f.path === "package.json");
-    if (pkgFile) {
-      try {
-        const pkg = JSON.parse(pkgFile.content);
-        const deps = Object.keys(pkg.dependencies || {});
-        for (const dep of deps) {
-          nia.indexDocsAsync(`https://www.npmjs.com/package/${dep}`);
-        }
-        log.info(`Nia: indexing repo ${niaRepoId} + ${deps.length} dependency docs`);
-      } catch (err) {
-        log.warn(`Failed to parse package.json for Nia dep indexing: ${err}`);
-      }
-    }
+    log.info(`Nia: indexing project repo ${niaRepoId}`);
   }
 
   // Create project object

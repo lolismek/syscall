@@ -173,6 +173,24 @@ export function createTransport(
     res.json({ projects });
   });
 
+  // --- POST /api/projects/:id/stop --- Stop a project permanently
+  app.post("/api/projects/:id/stop", jsonParser, (req, res) => {
+    const ctx = registry.get(req.params.id);
+    if (!ctx) {
+      res.status(404).json({ error: `Project not found: ${req.params.id}` });
+      return;
+    }
+    if (ctx.project.status === "stopped") {
+      res.json({ message: "Project already stopped", projectId: ctx.project.id });
+      return;
+    }
+    ctx.project.status = "stopped";
+    ctx.project.recruitingUntil = null;
+    ctx.taskBoard.setProject(ctx.project);
+    log.info(`Project stopped: ${ctx.project.id} — ${ctx.project.name}`);
+    res.json({ message: "Project stopped", projectId: ctx.project.id });
+  });
+
   // --- GET /api/status --- Project-specific or all-projects status
   app.get("/api/status", (req, res) => {
     const projectId = req.query.project_id as string | undefined;

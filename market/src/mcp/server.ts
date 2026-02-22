@@ -47,16 +47,19 @@ function createMcpServer(
     version: "0.1.0",
   });
 
-  /** Helper: get the bound project context or return null */
+  /** Helper: get the bound project context or return null (null if stopped) */
   function getProjectCtx() {
     if (!sessionCtx.projectId) return null;
-    return registry.get(sessionCtx.projectId) ?? null;
+    const ctx = registry.get(sessionCtx.projectId) ?? null;
+    if (ctx && ctx.project.status === "stopped") return null;
+    return ctx;
   }
 
-  /** Try to recover session by looking up which project owns this agent */
+  /** Try to recover session by looking up which project owns this agent (null if stopped) */
   function recoverSession(agentId: string): ReturnType<typeof getProjectCtx> {
     if (getProjectCtx()) return getProjectCtx();
     for (const pctx of registry.list()) {
+      if (pctx.project.status === "stopped") continue;
       if (pctx.taskBoard.getAgent(agentId)) {
         sessionCtx.projectId = pctx.project.id;
         sessionCtx.agentId = agentId;
@@ -103,6 +106,9 @@ function createMcpServer(
       const ctx = registry.get(project_id);
       if (!ctx) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Project not found: ${project_id}` }) }] };
+      }
+      if (ctx.project.status === "stopped") {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Project ${project_id} has been stopped. No new agents can join.` }) }] };
       }
 
       const { project, taskBoard, gitRepo } = ctx;

@@ -30,6 +30,7 @@ const HTML = `<!DOCTYPE html>
   .badge-recruiting { background: #bc8cff33; color: var(--purple); }
   .badge-active { background: #3fb95033; color: var(--green); }
   .badge-completed { background: #58a6ff33; color: var(--accent); }
+  .badge-stopped { background: #f8514933; color: var(--red); }
 
   /* Recruiting banner */
   .recruiting-banner { background: #bc8cff15; border: 1px solid #bc8cff44; border-radius: 8px; padding: 14px 20px; margin-bottom: 16px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
@@ -133,6 +134,8 @@ const HTML = `<!DOCTYPE html>
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); }
   .btn-ghost:hover { border-color: var(--accent); }
+  .btn-danger { background: transparent; color: var(--red); border: 1px solid var(--red); padding: 6px 14px; font-size: 12px; }
+  .btn-danger:hover { background: #f8514922; }
   .create-status { font-size: 12px; margin-top: 6px; min-height: 18px; }
   .create-status.error { color: var(--red); }
   .create-status.ok { color: var(--green); }
@@ -223,6 +226,7 @@ const HTML = `<!DOCTYPE html>
         <a class="github-link" id="githubLink" href="#" target="_blank" style="display:none"></a>
       </div>
       <span class="badge badge-planning" id="projectBadge">\\u2014</span>
+      <button class="btn btn-danger" id="stopBtn" onclick="stopProject()" style="display:none">Stop Project</button>
       <div class="progress-bar-wrap">
         <div class="progress-label"><span>Progress</span><span id="progressPct">0%</span></div>
         <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
@@ -376,6 +380,33 @@ document.getElementById("createInput").addEventListener("keydown", function(e) {
   if (e.key === "Enter") createProject();
 });
 
+async function stopProject() {
+  if (!selectedProjectId) return;
+  if (!confirm("Stop this project? This is permanent and cannot be undone.")) return;
+  const btn = document.getElementById("stopBtn");
+  btn.disabled = true;
+  try {
+    const res = await fetch(API_BASE + "/api/projects/" + encodeURIComponent(selectedProjectId) + "/stop", { method: "POST" });
+    if (!res.ok) { const d = await res.json(); alert(d.error || "Failed to stop project"); return; }
+    pollDetail();
+  } catch (err) {
+    alert("Network error: " + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function stopProjectById(id) {
+  if (!confirm("Stop this project? This is permanent and cannot be undone.")) return;
+  try {
+    const res = await fetch(API_BASE + "/api/projects/" + encodeURIComponent(id) + "/stop", { method: "POST" });
+    if (!res.ok) { const d = await res.json(); alert(d.error || "Failed to stop project"); return; }
+    fetchProjects();
+  } catch (err) {
+    alert("Network error: " + err.message);
+  }
+}
+
 // ---------- Project list ----------
 
 async function fetchProjects() {
@@ -398,9 +429,12 @@ async function fetchProjects() {
     document.getElementById("projectList").innerHTML = list.map(p => {
       const pct = p.taskCount ? Math.round((p.accepted / p.taskCount) * 100) : 0;
       const ghHtml = p.githubUrl ? '<span style="margin-left:8px"><a class="github-link" href="' + esc(p.githubUrl) + '" target="_blank" onclick="event.stopPropagation()">' + esc(p.githubUrl) + '</a></span>' : '';
+      const stopBtnHtml = (p.status !== "stopped" && p.status !== "completed")
+        ? ' <button class="btn btn-danger" style="margin-left:8px;padding:2px 10px;font-size:11px" onclick="event.stopPropagation();stopProjectById(\\'' + esc(p.id) + '\\')">Stop</button>'
+        : '';
       return '<div class="project-card" onclick="selectProject(\\'' + esc(p.id) + '\\')">'
         + '<div class="project-card-left">'
-        + '<div class="project-card-name">' + esc(p.name || p.id) + ' <span class="badge badge-' + esc(p.status) + '">' + esc(p.status) + '</span></div>'
+        + '<div class="project-card-name">' + esc(p.name || p.id) + ' <span class="badge badge-' + esc(p.status) + '">' + esc(p.status) + '</span>' + stopBtnHtml + '</div>'
         + '<div class="project-card-desc">' + esc(p.description || "") + '</div>'
         + '<div class="project-card-meta">' + esc(p.id) + ' \\u00B7 ' + relTime(p.createdAt) + ghHtml + '</div>'
         + '</div>'
@@ -590,6 +624,8 @@ function renderDetail(data) {
     const b = document.getElementById("projectBadge");
     b.textContent = data.project.status;
     b.className = "badge badge-" + data.project.status;
+    const stopBtn = document.getElementById("stopBtn");
+    stopBtn.style.display = (data.project.status !== "stopped" && data.project.status !== "completed") ? "inline-block" : "none";
     const ghLink = document.getElementById("githubLink");
     if (data.project.githubUrl) {
       ghLink.href = data.project.githubUrl;
@@ -708,11 +744,55 @@ function renderDetail(data) {
     niaLog.innerHTML = '<div class="empty-state">No Nia activity yet</div>';
     niaCountEl.textContent = "";
   } else {
-    niaCountEl.textContent = niaEvents.length + " events";
-    const typeLabel = { index_repo: "INDEX REPO", index_docs: "INDEX DOCS", search_project: "SEARCH", search_general: "GENERAL", search_web: "WEB", web_research: "RESEARCH", lookup: "LOOKUP" };
+    // Only show completed/errored events (skip "started" — they just duplicate)
+    const finished = niaEvents.filter(e => e.status !== "started");
+    niaCountEl.textContent = finished.length + " events";
     const statusIcon = { started: "\\u25CB", success: "\\u2713", error: "\\u2717" };
+
+    // Human-readable descriptions per event type
+    function describeEvent(e) {
+      const agentName = e.agentId ? e.agentId.split("-").slice(1, 2).join("") : null;
+      const who = agentName || "orchestrator";
+      const shortDetail = e.detail.length > 50 ? e.detail.slice(0, 50) + "\\u2026" : e.detail;
+
+      if (e.type === "index_repo") {
+        const repo = e.detail.split(":")[0].split("/").pop() || e.detail;
+        return e.status === "error"
+          ? "Failed to index repo " + repo
+          : "Indexed project repo " + repo;
+      }
+      if (e.type === "index_docs") {
+        const url = e.detail.split(":")[0];
+        return e.status === "error"
+          ? "Failed to index docs " + shortDetail
+          : "Indexed docs " + shortDetail;
+      }
+      if (e.type === "search_project") {
+        // Summarize the query — take first few meaningful words
+        const words = e.detail.split(/\\s+/).slice(0, 5).join(" ");
+        return who + " searched project for \\u201c" + words + (e.detail.split(/\\s+/).length > 5 ? "\\u2026" : "") + "\\u201d";
+      }
+      if (e.type === "search_general") {
+        const words = e.detail.split(/\\s+/).slice(0, 5).join(" ");
+        return who + " searched docs for \\u201c" + words + (e.detail.split(/\\s+/).length > 5 ? "\\u2026" : "") + "\\u201d";
+      }
+      if (e.type === "search_web") {
+        const words = e.detail.split(/\\s+/).slice(0, 6).join(" ");
+        return who + " web searched \\u201c" + words + (e.detail.split(/\\s+/).length > 6 ? "\\u2026" : "") + "\\u201d";
+      }
+      if (e.type === "web_research") {
+        return who + " researched \\u201c" + shortDetail + "\\u201d";
+      }
+      if (e.type === "lookup") {
+        return who + " looked up \\u201c" + shortDetail + "\\u201d";
+      }
+      return shortDetail;
+    }
+
+    const typeLabel = { index_repo: "INDEX", index_docs: "INDEX", search_project: "SEARCH", search_general: "SEARCH", search_web: "WEB", web_research: "RESEARCH", lookup: "LOOKUP" };
+
     // Show newest first
-    const sorted = [...niaEvents].reverse();
+    const sorted = [...finished].reverse();
     niaLog.innerHTML = sorted.map(e => {
       const time = new Date(e.timestamp);
       const hh = String(time.getHours()).padStart(2, "0");
@@ -721,14 +801,12 @@ function renderDetail(data) {
       const timeStr = hh + ":" + mm + ":" + ss;
       const badge = typeLabel[e.type] || e.type;
       const dur = e.durationMs != null ? (e.durationMs / 1000).toFixed(1) + "s" : "";
-      const agentStr = e.agentId ? " [" + e.agentId.split("-").slice(1, 2).join("") + "]" : "";
-      const detailTrunc = e.detail.length > 80 ? e.detail.slice(0, 80) + "..." : e.detail;
+      const desc = describeEvent(e);
       return '<div class="nia-event">'
         + '<span class="nia-time">' + timeStr + '</span>'
         + '<span class="nia-badge nia-badge-' + esc(e.type) + '">' + esc(badge) + '</span>'
-        + '<span class="nia-source nia-source-' + esc(e.source) + '">' + esc(e.source) + esc(agentStr) + '</span>'
         + '<span class="nia-status nia-status-' + esc(e.status) + '">' + (statusIcon[e.status] || "") + '</span>'
-        + '<span class="nia-detail">' + esc(detailTrunc) + '</span>'
+        + '<span class="nia-detail">' + esc(desc) + '</span>'
         + '<span class="nia-duration">' + esc(dur) + '</span>'
         + '</div>';
     }).join("");
