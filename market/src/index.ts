@@ -43,11 +43,11 @@ function parseArgs(): { projectIdea: string | null; fresh: boolean } {
 }
 
 function printUsage(): void {
-  console.log(`Usage: npx tsx src/index.ts [--model <model>] [--fresh] ["<project idea>"]
+  console.log(`Usage: bun src/index.ts [--model <model>] [--fresh] ["<project idea>"]
 
 Modes:
   With idea:    Creates a project and starts the server
-  Without idea: Starts the server only (create projects via POST /api/projects)
+  Without idea: Starts the server only (create projects via dashboard or API)
 
 Options:
   --model, -m    Anthropic model to use (default: ${config.model})
@@ -58,9 +58,9 @@ Options:
   --help, -h     Show this help
 
 Examples:
-  npx tsx src/index.ts                          # Server-only mode
-  npx tsx src/index.ts "Build a todo REST API"  # Create project + start server
-  npx tsx src/index.ts --fresh "Build a todo API"
+  bun start                                     # Server-only mode (dashboard at http://localhost:3100)
+  bun start "Build a todo REST API"             # Create project + start server
+  bun start -- --fresh "Build a todo API"
   curl -X POST localhost:3100/api/projects -H 'Content-Type: application/json' -d '{"idea":"Build a chat app"}'
 
 Environment variables (set in .env or shell):
@@ -184,9 +184,10 @@ async function main() {
   const app = createTransport(mcpServerFactory, registry, githubClient);
 
   app.listen(config.port, () => {
-    log.info(`MCP server listening on http://localhost:${config.port}/mcp`);
+    log.info(`Syscall Market running at http://localhost:${config.port}/`);
+    log.info(`MCP endpoint: http://localhost:${config.port}/mcp`);
     if (!projectIdea) {
-      log.info("Server-only mode — create projects via POST /api/projects");
+      log.info("Server-only mode — create projects via dashboard or POST /api/projects");
     }
     log.info("Waiting for agents to connect...");
   });

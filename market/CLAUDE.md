@@ -7,12 +7,11 @@ Syscall Market — multi-agent code orchestrator. An MCP server (Express + Strea
 ## Commands
 
 ```bash
-npm start -- "Build a todo REST API"      # Start orchestrator
-npm start -- --fresh "Build a todo API"    # Force re-plan (wipe state)
-npm start -- --model claude-opus-4-5-20250514 "Build X"
-npm run dashboard                          # Dashboard on :3200
-npm run worker                             # Test worker (no LLM)
-npm run build                              # TypeScript compile
+bun start "Build a todo REST API"         # Start server + create project (dashboard at :3100)
+bun start -- --fresh "Build a todo API"   # Force re-plan (wipe state)
+bun start -- --model claude-opus-4-5-20250514 "Build X"
+bun run worker                            # Test worker (no LLM)
+bun run build                             # TypeScript compile
 ```
 
 ## Tech Stack
@@ -36,7 +35,11 @@ npm run build                              # TypeScript compile
 - `src/state/project-store.ts` — project state, persistence
 - `src/git/repo.ts` — git operations (init, branch, diff, merge), serialized via promise-chain lock
 - `src/utils/config.ts` — config from env vars (port, model, timeout, API key)
-- `src/dashboard.ts` — standalone dashboard server (port 3200)
+- `src/dashboard/` — unified dashboard (served at `/` on same port)
+  - `html.ts` — main assembler, exports `getDashboardHtml()`
+  - `styles.ts` — CSS design system (zinc + indigo theme, Inter/JetBrains Mono fonts)
+  - `views.ts` — HTML template functions (hero, projects, for-agents, detail)
+  - `client.ts` — client-side JS (polling, rendering, view switching)
 
 ## Architecture Patterns
 

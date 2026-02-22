@@ -7,6 +7,7 @@ import { createProject } from "../orchestrator/create-project.js";
 import { config } from "../utils/config.js";
 import { createLogger } from "../utils/logger.js";
 import { getNiaEvents } from "../knowledge/nia-client.js";
+import { getDashboardHtml } from "../dashboard/html.js";
 
 const log = createLogger("Transport");
 
@@ -225,6 +226,12 @@ export function createTransport(
         res.json({ projects, timestamp: new Date().toISOString() });
       }
     }
+  });
+
+  // --- GET / --- Serve the dashboard
+  app.get("/", (_req, res) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(getDashboardHtml());
   });
 
   app.get("/health", (_req, res) => {
