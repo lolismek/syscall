@@ -73,7 +73,7 @@ export function getStyles(port: number): string {
   .hero-logo {
     width: 36px;
     height: 36px;
-    background: linear-gradient(135deg, var(--accent), #a855f7);
+    background: var(--accent);
     border-radius: var(--radius-sm);
     display: flex;
     align-items: center;
@@ -234,7 +234,7 @@ export function getStyles(port: number): string {
   .btn-sm { padding: 6px 12px; font-size: 12px; border-radius: var(--radius-xs); }
 
   /* ===== Forms ===== */
-  .create-form { display: flex; gap: 10px; margin-bottom: 12px; }
+  .create-form { display: flex; gap: 10px; margin-bottom: 12px; align-items: flex-start; }
   .create-input {
     flex: 1;
     background: var(--bg);
@@ -246,6 +246,9 @@ export function getStyles(port: number): string {
     font-size: 14px;
     outline: none;
     transition: var(--transition);
+    min-height: 72px;
+    resize: vertical;
+    line-height: 1.5;
   }
   .create-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
   .create-input::placeholder { color: var(--muted); }
@@ -265,25 +268,27 @@ export function getStyles(port: number): string {
   .advanced-toggle:hover { color: var(--text-secondary); }
   .advanced-options {
     display: none;
-    gap: 20px;
-    margin-bottom: 12px;
-    padding: 12px 16px;
-    background: var(--bg);
+    gap: 24px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    padding: 14px 16px;
+    border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     flex-wrap: wrap;
+    align-items: center;
   }
   .advanced-options.open { display: flex; }
   .create-option {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     font-size: 13px;
     color: var(--text-secondary);
   }
-  .create-option label { white-space: nowrap; }
+  .create-option label { white-space: nowrap; font-size: 12px; color: var(--muted); }
   .create-option input[type="number"] {
-    width: 80px;
-    background: var(--surface);
+    width: 72px;
+    background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-xs);
@@ -291,9 +296,15 @@ export function getStyles(port: number): string {
     font-family: 'JetBrains Mono', monospace;
     font-size: 13px;
     outline: none;
+    -moz-appearance: textfield;
+  }
+  .create-option input[type="number"]::-webkit-outer-spin-button,
+  .create-option input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
   }
   .create-option input[type="number"]:focus { border-color: var(--accent); }
-  .create-status { font-size: 13px; margin-top: 8px; min-height: 18px; }
+  .create-status { font-size: 13px; margin-top: 4px; min-height: 0; }
   .create-status.error { color: var(--red); }
   .create-status.ok { color: var(--green); }
 
@@ -461,8 +472,118 @@ export function getStyles(port: number): string {
   }
   .tools-table tr:last-child td { border-bottom: none; }
 
+  /* ===== Integration Header & Tabs ===== */
+  .integration-header {
+    background: var(--surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 0;
+  }
+  .integration-header h2 {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 6px;
+  }
+  .integration-header > p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 16px;
+  }
+  .endpoint-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .endpoint-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .integration-tabs {
+    display: flex;
+    gap: 0;
+    background: var(--surface);
+    border: 1px solid var(--border-subtle);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    margin-bottom: 16px;
+    overflow-x: auto;
+  }
+  .integration-tab {
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    cursor: pointer;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: none;
+    font-family: inherit;
+    transition: var(--transition);
+    white-space: nowrap;
+  }
+  .integration-tab:hover { color: var(--text-secondary); }
+  .integration-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .integration-panel { display: none; }
+  .integration-panel.active { display: block; }
+
+  .integration-badge {
+    display: inline-block;
+    background: var(--green-dim);
+    color: var(--green);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    margin-bottom: 12px;
+  }
+  .integration-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+  .step-alt {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 10px;
+  }
+  .code-block-multi {
+    white-space: pre;
+    word-break: normal;
+    line-height: 1.5;
+  }
+
+  .workflow-list { display: flex; flex-direction: column; gap: 12px; }
+  .workflow-item {
+    display: flex;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+  .workflow-item strong { color: var(--text); }
+  .workflow-icon {
+    color: var(--accent);
+    font-size: 14px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
   .coming-soon-banner {
-    background: linear-gradient(135deg, var(--accent-dim), var(--purple-dim));
+    background: var(--accent-dim);
     border: 1px solid var(--accent);
     border-radius: var(--radius);
     padding: 16px 24px;
@@ -530,14 +651,14 @@ export function getStyles(port: number): string {
   }
   .progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, var(--accent), var(--green));
+    background: var(--green);
     border-radius: 3px;
     transition: width 0.5s ease;
   }
 
   /* Recruiting banner */
   .recruiting-banner {
-    background: linear-gradient(135deg, var(--purple-dim), #a855f708);
+    background: var(--purple-dim);
     border: 1px solid #a855f744;
     border-radius: var(--radius);
     padding: 16px 24px;

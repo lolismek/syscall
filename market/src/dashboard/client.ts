@@ -35,6 +35,13 @@ function copyCode(el) {
   setTimeout(() => el.classList.remove("copied"), 1500);
 }
 
+// ---------- Integration tab switching ----------
+
+function switchIntegrationTab(tab) {
+  document.querySelectorAll(".integration-tab").forEach(t => t.classList.toggle("active", t.dataset.itab === tab));
+  document.querySelectorAll(".integration-panel").forEach(p => p.classList.toggle("active", p.id === "itab-" + tab));
+}
+
 // ---------- Client-side recruiting timer ----------
 
 function startRecruitingTimer(recruitingUntilIso, connectedAgents, minAgents) {
@@ -145,7 +152,7 @@ async function createProject() {
 }
 
 document.getElementById("createInput").addEventListener("keydown", function(e) {
-  if (e.key === "Enter") createProject();
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) createProject();
 });
 
 async function stopProject() {
@@ -202,12 +209,13 @@ function renderProgressRing(pct, size, stroke) {
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const offset = c - (pct / 100) * c;
-  return '<svg width="' + size + '" height="' + size + '" class="progress-ring">'
+  return '<div style="position:relative;width:' + size + 'px;height:' + size + 'px">'
+    + '<svg width="' + size + '" height="' + size + '" class="progress-ring">'
     + '<circle class="progress-ring-bg" cx="' + size/2 + '" cy="' + size/2 + '" r="' + r + '"/>'
     + '<circle class="progress-ring-fill" cx="' + size/2 + '" cy="' + size/2 + '" r="' + r + '" stroke-dasharray="' + c + '" stroke-dashoffset="' + offset + '"/>'
     + '</svg>'
-    + '<div style="position:relative;margin-top:-' + (size/2 + 8) + 'px;text-align:center"><span class="progress-ring-text" style="font-size:' + (size > 60 ? 16 : 12) + 'px">' + pct + '%</span></div>'
-    + '<div style="height:' + (size/2 - 8) + 'px"></div>';
+    + '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"><span class="progress-ring-text" style="font-size:' + (size > 60 ? 16 : 12) + 'px">' + pct + '%</span></div>'
+    + '</div>';
 }
 
 // ---------- Project list ----------
@@ -242,12 +250,13 @@ async function fetchProjects() {
       const r = (ringSize - 4) / 2;
       const c = 2 * Math.PI * r;
       const offset = c - (pct / 100) * c;
-      const ring = '<svg width="' + ringSize + '" height="' + ringSize + '" style="transform:rotate(-90deg)">'
+      const ring = '<div style="position:relative;width:' + ringSize + 'px;height:' + ringSize + 'px">'
+        + '<svg width="' + ringSize + '" height="' + ringSize + '" style="transform:rotate(-90deg)">'
         + '<circle cx="' + ringSize/2 + '" cy="' + ringSize/2 + '" r="' + r + '" fill="none" stroke="#3f3f46" stroke-width="3"/>'
         + '<circle cx="' + ringSize/2 + '" cy="' + ringSize/2 + '" r="' + r + '" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-dasharray="' + c + '" stroke-dashoffset="' + offset + '" style="transition:stroke-dashoffset 0.5s"/>'
         + '</svg>'
-        + '<div style="position:relative;margin-top:-' + (ringSize/2 + 6) + 'px;text-align:center;font-family:JetBrains Mono,monospace;font-size:12px;font-weight:600">' + pct + '%</div>'
-        + '<div style="height:' + (ringSize/2 - 6) + 'px"></div>';
+        + '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:JetBrains Mono,monospace;font-size:12px;font-weight:600">' + pct + '%</div>'
+        + '</div>';
       return '<div class="project-card" onclick="selectProject(\\'' + esc(p.id) + '\\')">'
         + '<div class="project-card-left">'
         + '<div class="project-card-name">' + esc(p.name || p.id) + ' <span class="badge badge-' + esc(p.status) + '">' + esc(p.status) + '</span>' + stopBtnHtml + deleteBtnHtml + '</div>'
