@@ -22,7 +22,7 @@ ref_source: |
           self.dstate = dstate
           self.delta_softplus = delta_softplus
           # Fixed parameters
-          self.A = nn.Parameter(torch.randn(dim, dstate))
+          self.A = nn.Parameter(-torch.exp(torch.randn(dim, dstate)))
           self.D = nn.Parameter(torch.randn(dim))
           self.delta_bias = nn.Parameter(torch.randn(dim))
 
