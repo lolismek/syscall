@@ -398,22 +398,10 @@ class NemotronClient:
         raise NemotronError("nemotron content does not contain a valid JSON object")
 
     def _supports_chat_template_kwargs(self) -> bool:
-        # chat_template_kwargs (enable_thinking) is supported by reasoning
-        # models on DeepInfra / NVIDIA.  Sending it to models that don't
-        # understand the parameter (e.g. DeepSeek V3.2) causes DeepInfra to
-        # drop the connection with RemoteDisconnected.
-        #
-        # Reasoning models that need this to control thinking output:
-        #   - Nemotron-3-Nano, DeepSeek-R1, Kimi-K2.5, QwQ, etc.
-        # Without enable_thinking=false, these models burn all max_tokens on
-        # reasoning_content and return empty content.
-        #
-        # If we auto-detected a reasoning model at runtime (empty content +
-        # reasoning_content present), always send it going forward.
         if self._detected_reasoning_model:
             return True
         model_lower = self.config.model.lower()
-        _REASONING_INDICATORS = ("nemotron", "deepseek-r1", "kimi", "qwq", "glm")
+        _REASONING_INDICATORS = ("nemotron", "kimi", "qwq", "glm")
         if any(tag in model_lower for tag in _REASONING_INDICATORS):
             provider = self.config.provider.strip().lower()
             if provider in ("nvidia", "deepinfra"):
