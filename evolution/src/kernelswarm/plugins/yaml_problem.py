@@ -139,6 +139,17 @@ class YamlProblem(KernelBenchProblem):
             return cls(spec)
         raise ValueError("YamlProblem requires 'yaml_path' or 'ref_source' in config")
 
+    def to_config_dict(self) -> dict[str, Any]:
+        d = super().to_config_dict()
+        d["ref_source"] = self._spec.ref_source
+        d["name"] = self._spec.name
+        d["pid"] = self._spec.pid
+        if self._spec.description:
+            d["description"] = self._spec.description
+        if self._spec.optimization_hints:
+            d["optimization_hints"] = self._spec.optimization_hints
+        return d
+
     def problem_id(self) -> str:
         return f"yaml:{self._spec.pid}"
 
