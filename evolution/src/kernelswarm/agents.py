@@ -303,7 +303,7 @@ class GeneratorAgent:
         prompt_context: dict[str, Any] | None = None,
     ) -> GeneratorDecision:
         with self._lock:
-            is_kb = prompt_context is not None and prompt_context.get("mode") == "kernelbench"
+            is_kb = prompt_context is not None and prompt_context.get("mode") in ("kernelbench", "yaml_problem")
             if self.client is None:
                 logger.warning("[%s] No LLM client configured, using heuristic fallback", self.agent_id)
                 if is_kb:
