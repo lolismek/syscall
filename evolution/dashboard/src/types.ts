@@ -35,6 +35,7 @@ export interface ScoreSummary {
 
 export interface TimeseriesPoint {
   iteration: number;
+  created_at: string | null;
   active_island_id: string;
   active_candidate_id: string | null;
   quick_fitness: number | null;

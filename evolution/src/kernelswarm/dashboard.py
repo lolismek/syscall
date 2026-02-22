@@ -303,6 +303,7 @@ class DashboardService:
                     iteration,
                     island_id,
                     candidate_id,
+                    created_at,
                     quick_fitness,
                     full_fitness,
                     quick_median_us,
@@ -384,6 +385,7 @@ class DashboardService:
             global_series.append(
                 {
                     "iteration": iteration,
+                    "created_at": str(active["created_at"]) if active["created_at"] else None,
                     "active_island_id": str(active["island_id"]),
                     "active_candidate_id": str(active["candidate_id"]) if active["candidate_id"] is not None else None,
                     "quick_fitness": (float(active["quick_fitness"]) if active["quick_fitness"] is not None else None),

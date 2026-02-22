@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import type { LeaderSource } from "../types.ts";
 import { shortId, fmt } from "../lib/format.ts";
 
@@ -8,6 +8,7 @@ interface Props {
 
 export default function LeaderCode({ leader }: Props) {
   const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const shikiRef = useRef<ReturnType<typeof import("shiki")["createHighlighter"]> | null>(null);
 
   const code =
@@ -48,6 +49,14 @@ export default function LeaderCode({ leader }: Props) {
     };
   }, [code]);
 
+  const handleCopy = useCallback(() => {
+    if (!code) return;
+    navigator.clipboard.writeText(code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [code]);
+
   return (
     <div className="bg-surface-50 border border-surface-200 rounded-xl overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-surface-200">
@@ -74,6 +83,17 @@ export default function LeaderCode({ leader }: Props) {
             <span className="rounded-full bg-accent/10 border border-accent/20 px-2 py-0.5 text-[10px] text-accent">
               {leader.stage}
             </span>
+          )}
+          {code && (
+            <button
+              onClick={handleCopy}
+              className="ml-2 px-2.5 py-1 rounded-md text-[11px] font-medium border transition-colors cursor-pointer
+                border-surface-200 text-gray-400 hover:text-gray-200 hover:border-gray-400
+                bg-surface-50 hover:bg-surface-100"
+              title="Copy kernel source"
+            >
+              {copied ? "Copied!" : "Copy"}
+            </button>
           )}
         </div>
       </div>
