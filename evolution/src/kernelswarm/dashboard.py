@@ -646,7 +646,10 @@ def _dashboard_html() -> str:
 <head>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>KernelSwarm Dashboard</title>
+  <title>Syscall</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #f5f7fb;
@@ -662,7 +665,7 @@ def _dashboard_html() -> str:
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;
+      font-family: \"IBM Plex Mono\", monospace;
       color: var(--ink);
       background: radial-gradient(circle at 20% 0%, #fff 0%, #f1f5fb 35%, #ecf1f9 100%);
     }
@@ -715,7 +718,7 @@ def _dashboard_html() -> str:
 <body>
 <header>
   <div class=\"row\">
-    <div class=\"title\">KernelSwarm Live Dashboard</div>
+    <div class=\"title\">Syscall</div>
     <span class=\"pill\" id=\"runStatus\">no run selected</span>
     <span class=\"muted\" id=\"lastRefresh\"></span>
   </div>

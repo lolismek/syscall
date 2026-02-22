@@ -20,10 +20,10 @@ export default function Header({
       <div className="mx-auto max-w-[1600px] px-4 py-3 flex items-center gap-4 flex-wrap">
         <div className="flex items-center gap-2">
           <div className="h-6 w-6 rounded-md bg-gradient-to-br from-accent to-info flex items-center justify-center text-[10px] font-bold text-white">
-            KS
+            S
           </div>
           <h1 className="text-base font-bold tracking-tight text-white">
-            KernelSwarm
+            Syscall
           </h1>
         </div>
 
