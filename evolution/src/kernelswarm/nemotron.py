@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
+import platform
 import random
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -11,6 +14,50 @@ from typing import Any
 from urllib import request
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# TCP keep-alive patch for urllib / http.client
+#
+# Python's urllib does not set SO_KEEPALIVE on sockets.  For long-running LLM
+# inference calls (30-120s), intermediate load balancers silently drop idle
+# TCP connections, causing RemoteDisconnected with no HTTP error code.
+#
+# We monkey-patch HTTPSConnection.connect to enable OS-level TCP keep-alive
+# probes so the connection stays alive through proxies / NLBs.
+# ---------------------------------------------------------------------------
+_KEEPALIVE_PATCHED = False
+
+
+def _patch_keepalive() -> None:
+    global _KEEPALIVE_PATCHED  # noqa: PLW0603
+    if _KEEPALIVE_PATCHED:
+        return
+    _KEEPALIVE_PATCHED = True
+
+    _original_connect = http.client.HTTPSConnection.connect
+
+    def _connect_with_keepalive(self: http.client.HTTPSConnection) -> None:
+        _original_connect(self)
+        # setsockopt works on SSLSocket directly — no unwrapping needed.
+        sock = self.sock
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if platform.system() == "Darwin":
+                # macOS uses TCP_KEEPALIVE (0x10) instead of TCP_KEEPIDLE.
+                sock.setsockopt(socket.IPPROTO_TCP, 0x10, 30)
+            else:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 6)
+        except OSError:
+            pass  # Non-fatal; keep-alive is best-effort.
+
+    http.client.HTTPSConnection.connect = _connect_with_keepalive  # type: ignore[assignment]
+
+
+_patch_keepalive()
 
 
 DEFAULT_NEMOTRON_MODEL = os.environ.get("KERNELSWARM_NEMOTRON_MODEL", "")
@@ -139,6 +186,7 @@ class NemotronClient:
                 _SEMAPHORES[key] = semaphore
                 _SEMAPHORE_LIMITS[key] = limit
         self._semaphore = semaphore
+        self._detected_reasoning_model = False
 
     def chat_json(
         self,
@@ -156,62 +204,86 @@ class NemotronClient:
             "temperature": mode.temperature,
             "max_tokens": mode.max_tokens,
         }
+
         if self._supports_json_response_format():
             body["response_format"] = {"type": "json_object"}
         if self._supports_chat_template_kwargs():
             body["chat_template_kwargs"] = {"enable_thinking": mode.enable_thinking}
-        req = request.Request(
-            f"{self.base_url}/chat/completions",
-            method="POST",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.config.resolved_api_key()}",
-                "Content-Type": "application/json",
-            },
-        )
 
-        max_retries = 3
+        # Always stream.  Long inference calls (30-120s) cause intermediate
+        # load balancers to kill idle connections (RemoteDisconnected).
+        # Streaming sends SSE chunks continuously, keeping the conn alive.
+        body["stream"] = True
+
+        url = f"{self.base_url}/chat/completions"
+        api_key = self.config.resolved_api_key()
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "kernelswarm/1.0",
+            "Accept": "text/event-stream",
+            "Connection": "keep-alive",
+        }
+        max_retries = 5
         start = time.perf_counter()
         for attempt in range(max_retries):
             try:
-                # Rebuild request on retry (urllib consumes the body)
-                if attempt > 0:
-                    req = request.Request(
-                        f"{self.base_url}/chat/completions",
-                        method="POST",
-                        data=json.dumps(body).encode("utf-8"),
-                        headers={
-                            "Authorization": f"Bearer {self.config.resolved_api_key()}",
-                            "Content-Type": "application/json",
-                        },
-                    )
+                req = request.Request(
+                    url, method="POST",
+                    data=json.dumps(body).encode("utf-8"),
+                    headers=headers,
+                )
                 with self._semaphore:
                     with request.urlopen(req, timeout=self.config.timeout_s) as resp:
-                        raw = resp.read().decode("utf-8")
+                        data = self._consume_stream(resp)
                 break
-            except Exception as exc:  # pragma: no cover - network path
+            except Exception as exc:
+                exc_chain = f"{type(exc).__name__}: {exc}"
+                cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+                if cause:
+                    exc_chain += f" <- {type(cause).__name__}: {cause}"
+                    cause2 = getattr(cause, "__cause__", None) or getattr(cause, "__context__", None)
+                    if cause2:
+                        exc_chain += f" <- {type(cause2).__name__}: {cause2}"
+
                 if attempt < max_retries - 1:
                     delay = (attempt + 1) * 2 + random.uniform(0, 2)
-                    logger.warning("LLM request failed (attempt %d/%d): %s — retrying in %.1fs", attempt + 1, max_retries, exc, delay)
+                    logger.warning(
+                        "LLM request failed (attempt %d/%d): %s — retrying in %.1fs",
+                        attempt + 1, max_retries, exc_chain, delay,
+                    )
                     time.sleep(delay)
                 else:
-                    raise NemotronError(f"nemotron request failed: {exc}") from exc
+                    raise NemotronError(
+                        f"nemotron request failed after {max_retries} attempts: {exc_chain}"
+                    ) from exc
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise NemotronError(f"nemotron response is not valid JSON: {exc}") from exc
-
-        content = self._extract_content(data)
-        if not content.strip():
-            finish = data.get("choices", [{}])[0].get("finish_reason", "unknown")
+        content = data.get("_content", "")
+        if not content.strip() and data.get("_reasoning_content"):
+            # Reasoning model detected at runtime — it burned all tokens on
+            # reasoning_content.  Retry once with enable_thinking=false.
+            if not self._detected_reasoning_model:
+                self._detected_reasoning_model = True
+                logger.warning(
+                    "Detected reasoning model at runtime (model=%s). "
+                    "Retrying with enable_thinking=false.",
+                    data.get("model", "?"),
+                )
+                return self.chat_json(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    mode=mode,
+                )
             logger.error(
-                "LLM returned empty content: finish_reason=%s, model=%s, raw_keys=%s, raw_snippet=%.500s",
-                finish,
+                "LLM returned empty content even with enable_thinking=false: model=%s",
                 data.get("model", "?"),
-                list(data.keys()),
-                raw[:500],
+            )
+        elif not content.strip():
+            logger.error(
+                "LLM returned empty content: model=%s, has_reasoning=%s",
+                data.get("model", "?"),
+                bool(data.get("_reasoning_content")),
             )
         payload = self._extract_json_payload(content)
         usage_data = data.get("usage", {})
@@ -224,6 +296,48 @@ class NemotronClient:
             model=str(data.get("model", self.config.model)),
         )
         return NemotronResult(payload=payload, usage=usage, raw_text=content)
+
+    @staticmethod
+    def _consume_stream(resp: Any) -> dict[str, Any]:
+        """Read an SSE stream and reassemble into a single response dict.
+
+        Returns a dict with ``_content``, ``_reasoning_content``, ``model``,
+        and ``usage`` keys — the same shape downstream code expects.
+        """
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        model = ""
+        usage: dict[str, Any] = {}
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if not model:
+                model = chunk.get("model", "")
+            # usage is sent in the final chunk by DeepInfra.
+            if "usage" in chunk:
+                usage = chunk["usage"]
+            choices = chunk.get("choices", [])
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            if delta.get("reasoning_content"):
+                reasoning_parts.append(delta["reasoning_content"])
+        return {
+            "_content": "".join(content_parts),
+            "_reasoning_content": "".join(reasoning_parts),
+            "model": model,
+            "usage": usage,
+        }
 
     @staticmethod
     def _extract_content(data: dict[str, Any]) -> str:
@@ -284,12 +398,23 @@ class NemotronClient:
         raise NemotronError("nemotron content does not contain a valid JSON object")
 
     def _supports_chat_template_kwargs(self) -> bool:
-        # chat_template_kwargs (enable_thinking) is only supported by reasoning
-        # models like Nemotron-3-Nano.  Sending it to models that don't
+        # chat_template_kwargs (enable_thinking) is supported by reasoning
+        # models on DeepInfra / NVIDIA.  Sending it to models that don't
         # understand the parameter (e.g. DeepSeek V3.2) causes DeepInfra to
         # drop the connection with RemoteDisconnected.
+        #
+        # Reasoning models that need this to control thinking output:
+        #   - Nemotron-3-Nano, DeepSeek-R1, Kimi-K2.5, QwQ, etc.
+        # Without enable_thinking=false, these models burn all max_tokens on
+        # reasoning_content and return empty content.
+        #
+        # If we auto-detected a reasoning model at runtime (empty content +
+        # reasoning_content present), always send it going forward.
+        if self._detected_reasoning_model:
+            return True
         model_lower = self.config.model.lower()
-        if "nemotron" in model_lower or "deepseek-r1" in model_lower:
+        _REASONING_INDICATORS = ("nemotron", "deepseek-r1", "kimi", "qwq", "glm")
+        if any(tag in model_lower for tag in _REASONING_INDICATORS):
             provider = self.config.provider.strip().lower()
             if provider in ("nvidia", "deepinfra"):
                 return True

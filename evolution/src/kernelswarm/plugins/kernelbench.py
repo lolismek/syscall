@@ -442,6 +442,15 @@ class KernelBenchProblem(OptimizationProblem):
         tests_total = max(1, self.config.quick_correct_trials)
         tests_passed = tests_total if eval_result.correctness else 0
 
+        # Extract numerical error magnitudes from KernelBench metadata.
+        max_abs_error = 0.0
+        max_diffs = eval_result.metadata.get("max_difference")
+        if max_diffs:
+            try:
+                max_abs_error = float(max_diffs[0] if isinstance(max_diffs, list) else max_diffs)
+            except (ValueError, TypeError, IndexError):
+                pass
+
         if eval_result.correctness:
             status = ValidationStatus.PASS
             failures: list[ValidationFailureCase] = []
@@ -461,7 +470,7 @@ class KernelBenchProblem(OptimizationProblem):
             tests_total=tests_total,
             tests_passed=tests_passed,
             tolerance=tolerance,
-            max_abs_error=0.0,
+            max_abs_error=max_abs_error,
             max_rel_error=0.0,
             failing_cases=failures,
         )
@@ -977,6 +986,9 @@ class KernelBenchProblem(OptimizationProblem):
     def _validation_summary(metadata: dict[str, Any]) -> str:
         if not metadata:
             return "KernelBench correctness failed"
+
+        parts: list[str] = []
+
         for key in (
             "correctness_issue",
             "runtime_error",
@@ -987,9 +999,29 @@ class KernelBenchProblem(OptimizationProblem):
             "cuda_error",
         ):
             if key in metadata:
-                return f"{key}={metadata[key]}"
-        first_key = sorted(metadata.keys())[0]
-        return f"{first_key}={metadata[first_key]}"
+                parts.append(f"{key}={metadata[key]}")
+                break
+
+        if not parts:
+            first_key = sorted(metadata.keys())[0]
+            parts.append(f"{first_key}={metadata[first_key]}")
+
+        # Append numerical error diagnostics when available so the LLM
+        # understands *how wrong* the output was (not just "mismatch").
+        max_diffs = metadata.get("max_difference")
+        avg_diffs = metadata.get("avg_difference")
+        if max_diffs:
+            val = max_diffs[0] if isinstance(max_diffs, list) else max_diffs
+            parts.append(f"max_abs_diff={val}")
+        if avg_diffs:
+            val = avg_diffs[0] if isinstance(avg_diffs, list) else avg_diffs
+            parts.append(f"avg_abs_diff={val}")
+
+        corr_trials = metadata.get("correctness_trials")
+        if corr_trials:
+            parts.append(f"trials={corr_trials}")
+
+        return "; ".join(parts)
 
     @staticmethod
     def _compiler_metrics_from_eval(eval_result: _KernelBenchEvalResult) -> dict[str, int | float]:

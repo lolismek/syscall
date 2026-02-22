@@ -8,11 +8,29 @@ from kernelswarm.nemotron import NemotronClient, NemotronConfig
 
 
 class _FakeHTTPResponse:
+    """Mock HTTP response that supports both .read() and SSE streaming iteration."""
+
     def __init__(self, payload: dict[str, object]) -> None:
         self._payload = payload
+        # Build SSE lines from the non-streaming response format.
+        content = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+        model = payload.get("model", "")
+        usage = payload.get("usage", {})
+        chunk = {
+            "model": model,
+            "choices": [{"delta": {"content": content}}],
+            "usage": usage,
+        }
+        self._lines = [
+            f"data: {json.dumps(chunk)}".encode(),
+            b"data: [DONE]",
+        ]
 
     def read(self) -> bytes:
         return json.dumps(self._payload).encode("utf-8")
+
+    def __iter__(self):
+        return iter(self._lines)
 
     def __enter__(self) -> "_FakeHTTPResponse":
         return self
@@ -78,8 +96,10 @@ class NemotronTests(unittest.TestCase):
             )
             client.chat_json(system_prompt="s", user_prompt="u")
 
-        self.assertNotIn("response_format", seen_body)
-        self.assertNotIn("chat_template_kwargs", seen_body)
+        # DeepInfra now supports both response_format and chat_template_kwargs
+        # for reasoning models like Nemotron.
+        self.assertIn("response_format", seen_body)
+        self.assertIn("chat_template_kwargs", seen_body)
 
 
 if __name__ == "__main__":

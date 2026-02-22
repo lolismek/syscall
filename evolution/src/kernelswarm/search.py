@@ -280,7 +280,7 @@ class SwarmSearchRunner:
                         hints = parent_failure_hints.get(parent.candidate_id)
                         if hints:
                             ctx = dict(prompt_context) if prompt_context else {}
-                            ctx["recent_failures"] = hints[:3]
+                            ctx["recent_failures"] = hints[:5]
                         future = proposal_exec.submit(
                             generator.propose,
                             parent=parent,
@@ -453,7 +453,7 @@ class SwarmSearchRunner:
                             if hint and candidate.parent_ids:
                                 pid = candidate.parent_ids[0]
                                 bucket = parent_failure_hints.setdefault(pid, [])
-                                if len(bucket) < 3:
+                                if len(bucket) < 5:
                                     bucket.append(hint)
 
                         full_attempted = island_full_attempts.get(island_id, 0)
@@ -1459,21 +1459,47 @@ class SwarmSearchRunner:
 
     @staticmethod
     def _extract_failure_hint(eval_result: CandidateEvaluation) -> str | None:
-        """Extract a short error summary from a failed evaluation."""
-        # Validation failures carry the richest info (compilation_error=..., correctness_issue=...).
+        """Extract an actionable error summary from a failed evaluation.
+
+        The hint is shown to the LLM generator so it can avoid repeating
+        the same mistake.  We include as much diagnostic detail as fits
+        in 400 chars — error category, numeric magnitudes, and build
+        stderr when available.
+        """
+        parts: list[str] = []
+
+        # --- Validation failures (richest info) ---
         vr = eval_result.validation_result
         if vr is not None and vr.failing_cases:
-            return vr.failing_cases[0].summary[:200]
-        # Raw score reason (judge_rejected, build_failed, static_check_failed, remote_eval_error).
-        raw = eval_result.quick_score.raw_score
-        if isinstance(raw, dict):
-            reason = raw.get("reason", "")
-            error = raw.get("error", "")
-            if error:
-                return f"{reason}: {error}"[:200]
-            if reason:
-                return str(reason)[:200]
-        return None
+            parts.append(vr.failing_cases[0].summary[:300])
+
+            # Surface numerical error magnitude so the LLM knows *how far off*
+            # the output was, not just "mismatch".
+            if vr.max_abs_error > 0:
+                parts.append(f"max_abs_error={vr.max_abs_error:.6g}")
+
+        # --- Build failures: include stderr / error type ---
+        br = eval_result.build_result
+        if br is not None and br.status.value != "success":
+            fp = br.toolchain_fingerprint or {}
+            error_type = fp.get("error_type", "")
+            if error_type:
+                parts.append(f"build_error_type={error_type}")
+
+        # --- Raw score reason fallback ---
+        if not parts:
+            raw = eval_result.quick_score.raw_score
+            if isinstance(raw, dict):
+                reason = raw.get("reason", "")
+                error = raw.get("error", "")
+                if error:
+                    parts.append(f"{reason}: {error}"[:300])
+                elif reason:
+                    parts.append(str(reason)[:300])
+
+        if not parts:
+            return None
+        return "; ".join(parts)[:400]
 
     @staticmethod
     def _get_prompt_context(problem: OptimizationProblem) -> dict[str, Any] | None:

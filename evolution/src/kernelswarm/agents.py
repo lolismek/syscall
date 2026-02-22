@@ -372,11 +372,14 @@ class GeneratorAgent:
         # Append failure feedback so the LLM avoids repeating the same mistakes.
         recent_failures = ctx.get("recent_failures", [])
         if recent_failures:
-            failure_lines = "\n".join(f"- {str(f)[:200]}" for f in recent_failures[:3])
+            failure_lines = "\n".join(f"- {str(f)[:400]}" for f in recent_failures[:5])
             user_prompt += (
                 "\n=== RECENT FAILURES (from mutations of this parent — avoid these mistakes) ===\n"
                 + failure_lines
-                + "\n"
+                + "\nAnalyse the error diagnostics above carefully. "
+                "If you see large max_abs_diff values with 'Output mismatch', "
+                "your kernel is computing incorrect results — check reduction "
+                "loops cover ALL elements (not just the first BLOCK_SIZE).\n"
             )
 
         # KernelBench needs enough tokens for full kernel source.
