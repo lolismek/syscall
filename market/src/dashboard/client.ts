@@ -2,7 +2,8 @@ export function getClientScript(): string {
   return `
 const API_BASE = "";
 let selectedProjectId = null;
-let currentView = "projects"; // "projects" | "agents" | "detail"
+let selectedEvolutionRunId = null;
+let currentView = "projects"; // "projects" | "agents" | "detail" | "evolution"
 
 // Client-side recruiting timer state
 let recruitingTargetTime = null; // Date.getTime() of recruitingUntil
@@ -81,6 +82,7 @@ function switchTab(tab) {
   document.getElementById("viewProjects").classList.toggle("active", tab === "projects");
   document.getElementById("viewAgents").classList.toggle("active", tab === "agents");
   document.getElementById("viewDetail").classList.remove("active");
+  document.getElementById("viewEvolution").classList.remove("active");
   document.getElementById("tabBar").style.display = "";
   if (tab === "projects") fetchProjects();
   if (tab === "agents") fetchLiveProjects();
@@ -88,15 +90,18 @@ function switchTab(tab) {
 
 function showProjectList() {
   selectedProjectId = null;
+  selectedEvolutionRunId = null;
   stopRecruitingTimer();
   switchTab("projects");
 }
 
 function selectProject(id) {
   selectedProjectId = id;
+  selectedEvolutionRunId = null;
   currentView = "detail";
   document.getElementById("viewProjects").classList.remove("active");
   document.getElementById("viewAgents").classList.remove("active");
+  document.getElementById("viewEvolution").classList.remove("active");
   document.getElementById("viewDetail").classList.add("active");
   document.getElementById("tabBar").style.display = "none";
   pollDetail();
@@ -233,9 +238,13 @@ async function fetchProjects() {
     document.getElementById("projectCount").textContent = list.length ? list.length + " total" : "";
 
     if (list.length === 0) {
-      document.getElementById("projectList").innerHTML = '<div class="empty-state">No projects yet. Create one above.</div>';
+      document.getElementById("projectList").innerHTML = '';
+      fetchEvolutionCards();
       return;
     }
+
+    // Also fetch evolution runs and append
+    fetchEvolutionCards();
 
     document.getElementById("projectList").innerHTML = list.map(function(p) {
       const pct = p.taskCount ? Math.round((p.accepted / p.taskCount) * 100) : 0;
@@ -717,6 +726,213 @@ function renderDetail(data) {
   }).join("");
 }
 
+// ---------- Evolution ----------
+
+async function fetchEvolutionCards() {
+  try {
+    var res = await fetch(API_BASE + "/api/evolution-runs");
+    if (!res.ok) return;
+    var data = await res.json();
+    var runs = data.runs || [];
+    if (runs.length === 0) return;
+
+    var grid = document.getElementById("projectList");
+    var html = runs.map(function(r) {
+      var bestFitness = r.best_full_fitness != null ? r.best_full_fitness : r.best_quick_fitness;
+      var fitnessHtml = '<div class="evo-metric"><div class="evo-metric-value">' + (bestFitness != null ? fmtNum(bestFitness, 1) : '\\u2014') + '</div><div class="evo-metric-label">fitness</div></div>';
+      return '<div class="project-card evolution-card" onclick="selectEvolutionRun(\\'' + esc(r.id) + '\\')">'
+        + '<div class="project-card-left">'
+        + '<div class="project-card-name">' + esc(r.name) + ' <span class="badge badge-evolution">evolution</span></div>'
+        + '<div class="project-card-desc">' + esc(r.description) + '</div>'
+        + '<div class="project-card-meta">' + r.candidate_count + ' candidates &middot; ' + r.latest_iteration + ' iterations</div>'
+        + '</div>'
+        + '<div class="project-card-right">' + fitnessHtml + '</div>'
+        + '</div>';
+    }).join("");
+    grid.insertAdjacentHTML("beforeend", html);
+  } catch(e) {}
+}
+
+async function selectEvolutionRun(id) {
+  selectedEvolutionRunId = id;
+  selectedProjectId = null;
+  currentView = "evolution";
+  document.getElementById("viewProjects").classList.remove("active");
+  document.getElementById("viewAgents").classList.remove("active");
+  document.getElementById("viewDetail").classList.remove("active");
+  document.getElementById("viewEvolution").classList.add("active");
+  document.getElementById("tabBar").style.display = "none";
+
+  try {
+    var res = await fetch(API_BASE + "/api/evolution-runs/" + encodeURIComponent(id));
+    if (!res.ok) throw new Error(res.status);
+    var data = await res.json();
+    renderEvolutionDetail(data);
+  } catch(e) {
+    document.getElementById("evoRunName").textContent = "Error loading run";
+  }
+}
+
+function fmtNum(v, decimals) {
+  if (v == null || !Number.isFinite(v)) return '\\u2014';
+  if (decimals != null) return v.toFixed(decimals);
+  return String(v);
+}
+
+function shortId(s) {
+  return s ? s.slice(0, 8) : '\\u2014';
+}
+
+function renderEvolutionDetail(data) {
+  document.getElementById("evoBreadcrumbName").textContent = data.name;
+  document.getElementById("evoRunName").textContent = data.name;
+  document.getElementById("evoRunDesc").textContent = data.description;
+
+  var ts = data.timeseries || {};
+  var globalSeries = ts.global || [];
+  var latest = globalSeries.length ? globalSeries[globalSeries.length - 1] : {};
+
+  // KPIs — matching evolution dashboard exactly
+  var kpis = [
+    { label: "Run", value: shortId(data.id) },
+    { label: "Problem", value: data.problem_id || 'n/a' },
+    { label: "Best Full Fitness", value: fmtNum(data.best && data.best.full ? data.best.full.scalar_fitness : null, 4) },
+    { label: "Best Full Median us", value: fmtNum(latest.best_full_median_us, 2) },
+    { label: "Best Quick Fitness", value: fmtNum(data.best && data.best.quick ? data.best.quick.scalar_fitness : null, 4) },
+    { label: "Best Quick Median us", value: fmtNum(latest.best_quick_median_us, 2) },
+    { label: "Latest Iteration", value: latest.iteration != null ? String(latest.iteration) : 'n/a' },
+    { label: "Total Tokens", value: latest.total_tokens != null ? String(latest.total_tokens) : '0' },
+  ];
+  document.getElementById("evoKpiGrid").innerHTML = kpis.map(function(k) {
+    return '<div class="evo-kpi"><div class="evo-kpi-value">' + esc(k.value) + '</div><div class="evo-kpi-label">' + esc(k.label) + '</div></div>';
+  }).join("");
+
+  // Charts — using the computed monotonic running-best fields
+  drawEvoChart("evoChartFitness", globalSeries, "best_representative_fitness", "#a855f7", {});
+  drawEvoChart("evoChartLatency", globalSeries, "best_representative_median_us", "#06b6d4", {});
+  drawEvoChart("evoChartTokens", globalSeries, "total_tokens", "#eab308", {});
+
+  // State counts — as a table with State / Count columns
+  var states = data.state_counts || {};
+  var stateEntries = Object.entries(states).sort(function(a, b) { return a[0].localeCompare(b[0]); });
+  if (stateEntries.length === 0) {
+    document.getElementById("evoStateCounts").innerHTML = '<div class="empty-state">No candidates yet</div>';
+  } else {
+    var stHtml = '<table><thead><tr><th>State</th><th>Count</th></tr></thead><tbody>';
+    stateEntries.forEach(function(entry) {
+      stHtml += '<tr><td>' + esc(entry[0]) + '</td><td>' + entry[1] + '</td></tr>';
+    });
+    stHtml += '</tbody></table>';
+    document.getElementById("evoStateCounts").innerHTML = stHtml;
+  }
+
+  // Island Evolution State
+  var islands = ts.islands || {};
+  var islandIds = Object.keys(islands).sort();
+  var islandsEl = document.getElementById("evoIslands");
+  if (islandIds.length === 0) {
+    islandsEl.innerHTML = '<div class="empty-state">No island data</div>';
+  } else {
+    islandsEl.innerHTML = islandIds.map(function(id, idx) {
+      var pts = islands[id] || [];
+      var last = pts.length ? pts[pts.length - 1] : null;
+      var covText = last ? 'coverage=' + fmtNum(last.coverage_ratio, 4) + ' bins=' + (last.occupied_bins != null ? last.occupied_bins : 'n/a') : '';
+      return '<div class="evo-island-card">'
+        + '<div class="evo-island-header"><strong class="evo-island-name">' + esc(id) + '</strong><span style="font-size:11px;color:var(--muted)">top fitness</span></div>'
+        + '<div class="evo-island-meta">' + esc(covText) + '</div>'
+        + '<canvas id="evoIslandChart' + idx + '" width="600" height="180"></canvas>'
+        + '</div>';
+    }).join("");
+    // Draw island charts after DOM insertion
+    islandIds.forEach(function(id, idx) {
+      var pts = islands[id] || [];
+      drawEvoChart("evoIslandChart" + idx, pts, "top_fitness", "#22c55e", {});
+    });
+  }
+
+  // Leaderboards — columns: Candidate ID, Fitness, Median (us), State
+  renderEvoLeaderboard("evoLeaderboardQuick", data.leaderboard_quick || []);
+  renderEvoLeaderboard("evoLeaderboardFull", data.leaderboard_full || []);
+}
+
+function renderEvoLeaderboard(elId, entries) {
+  var el = document.getElementById(elId);
+  if (!entries.length) { el.innerHTML = '<div class="empty-state">No scores yet</div>'; return; }
+  var html = '<table><thead><tr><th>Candidate</th><th>Fitness</th><th>Median (us)</th><th>State</th></tr></thead><tbody>';
+  entries.forEach(function(e) {
+    html += '<tr>'
+      + '<td>' + esc(shortId(e.candidate_id)) + '</td>'
+      + '<td>' + fmtNum(e.scalar_fitness, 4) + '</td>'
+      + '<td>' + fmtNum(e.median_us, 2) + '</td>'
+      + '<td>' + esc(e.state || 'n/a') + '</td>'
+      + '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function drawEvoChart(canvasId, points, valueKey, color, opts) {
+  var c = document.getElementById(canvasId);
+  if (!c) return;
+  var ctx = c.getContext("2d");
+  var w = c.width, h = c.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "rgba(9, 9, 11, 0.4)";
+  ctx.fillRect(0, 0, w, h);
+
+  var xKey = (opts && opts.xKey) || "iteration";
+  var series = (points || []).map(function(p, i) {
+    var y = Number(p[valueKey]);
+    if (!Number.isFinite(y)) return null;
+    var x = Number(p[xKey]);
+    return { x: Number.isFinite(x) ? x : i, y: y };
+  }).filter(Boolean);
+
+  if (!series.length) {
+    ctx.fillStyle = "#71717a";
+    ctx.font = "12px sans-serif";
+    ctx.fillText("no data yet", 12, 20);
+    return;
+  }
+
+  var vals = series.map(function(p) { return p.y; });
+  var xs = series.map(function(p) { return p.x; });
+  var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+  var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
+  var pad = 32;
+  var plotW = w - pad * 2;
+  var plotH = h - pad * 2;
+  var xSpan = Math.max(1e-9, maxX - minX);
+  var ySpan = Math.max(1e-9, max - min);
+
+  // Grid
+  ctx.strokeStyle = "#3f3f46";
+  ctx.lineWidth = 1;
+  for (var i = 0; i < 5; i++) {
+    var gy = pad + (plotH * i / 4);
+    ctx.beginPath(); ctx.moveTo(pad, gy); ctx.lineTo(w - pad, gy); ctx.stroke();
+  }
+
+  // Line
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  series.forEach(function(pt, i) {
+    var x = pad + plotW * ((pt.x - minX) / xSpan);
+    var y = pad + plotH * (1 - ((pt.y - min) / ySpan));
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Labels
+  ctx.fillStyle = "#a1a1aa";
+  ctx.font = "11px 'JetBrains Mono', monospace";
+  ctx.fillText("min " + fmtNum(min, 2), 4, h - 8);
+  ctx.fillText("max " + fmtNum(max, 2), 4, 14);
+  ctx.fillText("x " + fmtNum(minX, 0) + "\\u2013" + fmtNum(maxX, 0), w - 130, h - 8);
+}
+
 // ---------- Polling ----------
 
 async function pollDetail() {
@@ -735,6 +951,7 @@ async function pollDetail() {
 async function tick() {
   if (currentView === "projects") await fetchProjects();
   else if (currentView === "agents") { await fetchLiveProjects(); await fetchProjects(); }
+  else if (currentView === "evolution") { /* static data, no polling */ }
   else await pollDetail();
 }
 

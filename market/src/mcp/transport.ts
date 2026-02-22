@@ -10,6 +10,7 @@ import { config } from "../utils/config.js";
 import { createLogger } from "../utils/logger.js";
 import { getNiaEvents } from "../knowledge/nia-client.js";
 import { getDashboardHtml } from "../dashboard/html.js";
+import { getEvolutionData, getEvolutionRun } from "../state/evolution-data.js";
 
 const log = createLogger("Transport");
 
@@ -249,6 +250,33 @@ export function createTransport(
         res.json({ projects, timestamp: new Date().toISOString() });
       }
     }
+  });
+
+  // --- GET /api/evolution-runs --- List evolution runs (card data)
+  app.get("/api/evolution-runs", (_req, res) => {
+    const data = getEvolutionData();
+    const cards = data.runs.map((r) => ({
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      problem_id: r.problem_id,
+      status: r.status,
+      candidate_count: r.candidate_count,
+      latest_iteration: r.latest_iteration,
+      best_quick_fitness: r.best?.quick?.scalar_fitness ?? null,
+      best_full_fitness: r.best?.full?.scalar_fitness ?? null,
+    }));
+    res.json({ runs: cards });
+  });
+
+  // --- GET /api/evolution-runs/:id --- Full detail for one evolution run
+  app.get("/api/evolution-runs/:id", (req, res) => {
+    const run = getEvolutionRun(req.params.id);
+    if (!run) {
+      res.status(404).json({ error: `Evolution run not found: ${req.params.id}` });
+      return;
+    }
+    res.json(run);
   });
 
   // --- Static assets (public/) ---
