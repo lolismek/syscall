@@ -3,6 +3,7 @@ export function getClientScript(): string {
 const API_BASE = "";
 let selectedProjectId = null;
 let selectedEvolutionRunId = null;
+let isLiveEvolution = false;
 let currentView = "projects"; // "projects" | "agents" | "detail" | "evolution"
 
 // Client-side recruiting timer state
@@ -91,6 +92,7 @@ function switchTab(tab) {
 function showProjectList() {
   selectedProjectId = null;
   selectedEvolutionRunId = null;
+  isLiveEvolution = false;
   stopRecruitingTimer();
   switchTab("projects");
 }
@@ -127,16 +129,19 @@ async function createProject() {
 
   const recruitingDurationSeconds = parseInt(document.getElementById("recruitingTime").value, 10) || 0;
   const minAgents = parseInt(document.getElementById("minAgents").value, 10) || 1;
+  const useEvolution = document.getElementById("useEvolution").checked;
 
   btn.disabled = true;
-  status.textContent = "Creating project... (planning via LLM, may take 30-60s)";
+  status.textContent = useEvolution
+    ? "Starting evolution algorithm..."
+    : "Creating project... (planning via LLM, may take 30-60s)";
   status.className = "create-status";
 
   try {
     const res = await fetch(API_BASE + "/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ idea, recruitingDurationSeconds, minAgents }),
+      body: JSON.stringify({ idea, recruitingDurationSeconds, minAgents, useEvolution }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -146,6 +151,12 @@ async function createProject() {
     }
     status.textContent = "";
     input.value = "";
+
+    if (data.evolutionRunId) {
+      // Evolution mode — navigate to live evolution view
+      selectEvolutionRun(data.evolutionRunId, true);
+      return;
+    }
     // Navigate to the project immediately — it shows a planning skeleton
     selectProject(data.projectId);
   } catch (err) {
@@ -740,9 +751,11 @@ async function fetchEvolutionCards() {
     var html = runs.map(function(r) {
       var bestFitness = r.best_full_fitness != null ? r.best_full_fitness : r.best_quick_fitness;
       var fitnessHtml = '<div class="evo-metric"><div class="evo-metric-value">' + (bestFitness != null ? fmtNum(bestFitness, 1) : '\\u2014') + '</div><div class="evo-metric-label">fitness</div></div>';
-      return '<div class="project-card evolution-card" onclick="selectEvolutionRun(\\'' + esc(r.id) + '\\')">'
+      var liveTag = r.live ? '<span class="live-indicator"></span>' : '';
+      var onClickFn = r.live ? "selectEvolutionRun(\\'" + esc(r.id) + "\\', true)" : "selectEvolutionRun(\\'" + esc(r.id) + "\\')";
+      return '<div class="project-card evolution-card" onclick="' + onClickFn + '">'
         + '<div class="project-card-left">'
-        + '<div class="project-card-name">' + esc(r.name) + ' <span class="badge badge-evolution">evolution</span></div>'
+        + '<div class="project-card-name">' + esc(r.name) + ' <span class="badge badge-evolution">evolution</span>' + liveTag + '</div>'
         + '<div class="project-card-desc">' + esc(r.description) + '</div>'
         + '<div class="project-card-meta">' + r.candidate_count + ' candidates &middot; ' + r.latest_iteration + ' iterations</div>'
         + '</div>'
@@ -753,15 +766,26 @@ async function fetchEvolutionCards() {
   } catch(e) {}
 }
 
-async function selectEvolutionRun(id) {
+async function selectEvolutionRun(id, live) {
   selectedEvolutionRunId = id;
   selectedProjectId = null;
+  isLiveEvolution = !!live;
   currentView = "evolution";
   document.getElementById("viewProjects").classList.remove("active");
   document.getElementById("viewAgents").classList.remove("active");
   document.getElementById("viewDetail").classList.remove("active");
   document.getElementById("viewEvolution").classList.add("active");
   document.getElementById("tabBar").style.display = "none";
+
+  if (isLiveEvolution) {
+    // Show loading state, polling will fill in the data
+    document.getElementById("evoBreadcrumbName").textContent = "Live Evolution";
+    document.getElementById("evoRunName").textContent = "Live Evolution";
+    document.getElementById("evoRunDesc").textContent = "Starting evolution search... data will appear shortly.";
+    document.getElementById("evoKpiGrid").innerHTML = '<div class="empty-state">Waiting for data...</div>';
+    pollLiveEvolution();
+    return;
+  }
 
   try {
     var res = await fetch(API_BASE + "/api/evolution-runs/" + encodeURIComponent(id));
@@ -770,6 +794,92 @@ async function selectEvolutionRun(id) {
     renderEvolutionDetail(data);
   } catch(e) {
     document.getElementById("evoRunName").textContent = "Error loading run";
+  }
+}
+
+async function pollLiveEvolution() {
+  if (!selectedEvolutionRunId || !isLiveEvolution || currentView !== "evolution") return;
+  var evoId = selectedEvolutionRunId;
+  var base = API_BASE + "/api/evolution-live/" + encodeURIComponent(evoId);
+
+  try {
+    // Step 1: discover the internal run_id from the sidecar
+    // Sidecar API: GET /api/runs -> {ok, runs: [{run_id, problem_id, status, ...}]}
+    var runsRes = await fetch(base + "/runs");
+    if (!runsRes.ok) {
+      if (runsRes.status === 503) {
+        document.getElementById("evoRunDesc").textContent = "Evolution starting... waiting for sidecar dashboard.";
+      }
+      return;
+    }
+    var runsData = await runsRes.json();
+    var runs = runsData.runs || [];
+    if (!runs.length) {
+      document.getElementById("evoRunDesc").textContent = "Waiting for first iteration...";
+      return;
+    }
+    var runId = runs[0].run_id;
+    if (!runId) return;
+
+    // Step 2: fetch all detail endpoints in parallel
+    // Sidecar wraps each response: {ok, overview: {...}}, {ok, timeseries: {...}}, etc.
+    var [overviewRaw, timeseriesRaw, statesRaw, quickRaw, fullRaw] = await Promise.all([
+      fetch(base + "/runs/" + encodeURIComponent(runId) + "/overview").then(function(r) { return r.ok ? r.json() : {}; }),
+      fetch(base + "/runs/" + encodeURIComponent(runId) + "/timeseries").then(function(r) { return r.ok ? r.json() : {}; }),
+      fetch(base + "/runs/" + encodeURIComponent(runId) + "/states").then(function(r) { return r.ok ? r.json() : {}; }),
+      fetch(base + "/runs/" + encodeURIComponent(runId) + "/leaderboard?stage=quick").then(function(r) { return r.ok ? r.json() : {}; }),
+      fetch(base + "/runs/" + encodeURIComponent(runId) + "/leaderboard?stage=full").then(function(r) { return r.ok ? r.json() : {}; }),
+    ]);
+
+    // Unwrap the sidecar response wrappers
+    var overview = overviewRaw.overview || {};
+    var ts = timeseriesRaw.timeseries || {};
+    var statesData = statesRaw.states || {};
+    var quickRows = quickRaw.rows || [];
+    var fullRows = fullRaw.rows || [];
+
+    // Step 3: transform into the shape renderEvolutionDetail expects
+    // overview.latest_iteration is an object: {iteration, global_best_fitness, total_tokens, ...}
+    var latestIter = overview.latest_iteration || {};
+
+    var detailData = {
+      id: evoId,
+      name: "Live: " + (overview.problem_id || runs[0].problem_id || "evolution"),
+      description: "Live kernel optimization (" + (overview.status || "running") + ")",
+      problem_id: overview.problem_id || runs[0].problem_id || "vector_add_v1",
+      status: overview.status || "running",
+      candidate_count: 0,
+      latest_iteration: latestIter.iteration || 0,
+      total_tokens: latestIter.total_tokens || 0,
+      best: overview.best || { quick: null, full: null },
+      state_counts: overview.state_counts || statesData.state_counts || {},
+      timeseries: {
+        global: ts.global || [],
+        islands: ts.islands || {},
+      },
+      leaderboard_quick: quickRows.map(function(e) {
+        var rs = e.raw_score || {};
+        return {
+          candidate_id: e.candidate_id,
+          scalar_fitness: e.scalar_fitness,
+          median_us: rs.median_us != null ? rs.median_us : null,
+          state: e.state || null,
+        };
+      }),
+      leaderboard_full: fullRows.map(function(e) {
+        var rs = e.raw_score || {};
+        return {
+          candidate_id: e.candidate_id,
+          scalar_fitness: e.scalar_fitness,
+          median_us: rs.median_us != null ? rs.median_us : null,
+          state: e.state || null,
+        };
+      }),
+    };
+
+    renderEvolutionDetail(detailData);
+  } catch(e) {
+    // Sidecar not ready yet or transient error, retry on next tick
   }
 }
 
@@ -951,7 +1061,7 @@ async function pollDetail() {
 async function tick() {
   if (currentView === "projects") await fetchProjects();
   else if (currentView === "agents") { await fetchLiveProjects(); await fetchProjects(); }
-  else if (currentView === "evolution") { /* static data, no polling */ }
+  else if (currentView === "evolution") { if (isLiveEvolution) await pollLiveEvolution(); }
   else await pollDetail();
 }
 

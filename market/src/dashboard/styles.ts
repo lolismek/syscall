@@ -1091,5 +1091,37 @@ export function getStyles(port: number): string {
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
   }
+
+  /* Evolution checkbox */
+  .create-option input[type="checkbox"] {
+    accent-color: var(--purple);
+    width: 16px;
+    height: 16px;
+    vertical-align: middle;
+    margin-right: 6px;
+    cursor: pointer;
+  }
+  .create-option label[for="useEvolution"] {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* Live evolution indicator */
+  .live-indicator {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background: var(--green);
+    border-radius: 50%;
+    margin-left: 6px;
+    animation: live-pulse 1.5s ease-in-out infinite;
+    vertical-align: middle;
+  }
+  @keyframes live-pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 4px var(--green); }
+    50% { opacity: 0.4; box-shadow: 0 0 8px var(--green); }
+  }
   `;
 }

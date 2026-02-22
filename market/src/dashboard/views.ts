@@ -45,6 +45,12 @@ export function getProjectsViewHtml(): string {
           <label for="minAgents">Min agents for early start</label>
           <input type="number" id="minAgents" value="1" min="1" step="1" />
         </div>
+        <div class="create-option">
+          <label for="useEvolution">
+            <input type="checkbox" id="useEvolution" />
+            Use Evolution Algorithm (LLM Swarm)
+          </label>
+        </div>
       </div>
       <div class="create-status" id="createStatus"></div>
     </div>

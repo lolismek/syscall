@@ -9,6 +9,7 @@ import { initDatabase, resetDatabase } from "./state/database.js";
 import { setNiaDb } from "./knowledge/nia-client.js";
 import { config } from "./utils/config.js";
 import { createLogger } from "./utils/logger.js";
+import { cleanupAll as cleanupEvolution } from "./state/evolution-manager.js";
 
 const log = createLogger("Main");
 
@@ -201,6 +202,15 @@ async function main() {
     }
     log.info("Waiting for agents to connect...");
   });
+
+  // Cleanup evolution child processes on shutdown
+  const shutdownHandler = () => {
+    log.info("Shutting down — cleaning up evolution processes...");
+    cleanupEvolution();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdownHandler);
+  process.on("SIGTERM", shutdownHandler);
 }
 
 /** Wire up task_submitted validation for a project context */

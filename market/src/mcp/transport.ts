@@ -11,6 +11,7 @@ import { createLogger } from "../utils/logger.js";
 import { getNiaEvents } from "../knowledge/nia-client.js";
 import { getDashboardHtml } from "../dashboard/html.js";
 import { getEvolutionData, getEvolutionRun } from "../state/evolution-data.js";
+import { startEvolutionRun, getLiveRun, listLiveRuns } from "../state/evolution-manager.js";
 
 const log = createLogger("Transport");
 
@@ -123,11 +124,24 @@ export function createTransport(
 
   // --- POST /api/projects --- Create a new project
   app.post("/api/projects", jsonParser, async (req, res) => {
-    const { idea, model, recruitingDurationSeconds, minAgents } = req.body as {
-      idea?: string; model?: string; recruitingDurationSeconds?: number; minAgents?: number;
+    const { idea, model, recruitingDurationSeconds, minAgents, useEvolution } = req.body as {
+      idea?: string; model?: string; recruitingDurationSeconds?: number; minAgents?: number; useEvolution?: boolean;
     };
     if (!idea || typeof idea !== "string") {
       res.status(400).json({ error: "Missing required field: idea (string)" });
+      return;
+    }
+
+    // Evolution mode — spawn evolution processes instead of normal project
+    if (useEvolution) {
+      try {
+        const { evolutionRunId, dashboardPort } = startEvolutionRun(idea);
+        log.info(`Started evolution run ${evolutionRunId} on port ${dashboardPort} for prompt: ${idea.slice(0, 80)}`);
+        res.status(201).json({ evolutionRunId, dashboardPort });
+      } catch (err) {
+        log.error(`Failed to start evolution run: ${err}`);
+        res.status(500).json({ error: `Failed to start evolution: ${err}` });
+      }
       return;
     }
 
@@ -252,7 +266,7 @@ export function createTransport(
     }
   });
 
-  // --- GET /api/evolution-runs --- List evolution runs (card data)
+  // --- GET /api/evolution-runs --- List evolution runs (card data, static + live)
   app.get("/api/evolution-runs", (_req, res) => {
     const data = getEvolutionData();
     const cards = data.runs.map((r) => ({
@@ -265,7 +279,25 @@ export function createTransport(
       latest_iteration: r.latest_iteration,
       best_quick_fitness: r.best?.quick?.scalar_fitness ?? null,
       best_full_fitness: r.best?.full?.scalar_fitness ?? null,
+      live: false,
     }));
+
+    // Merge live evolution runs
+    for (const run of listLiveRuns()) {
+      cards.unshift({
+        id: run.id,
+        name: `Evolution: ${run.prompt.slice(0, 50)}`,
+        description: run.prompt,
+        problem_id: "reduction_v1",
+        status: run.status,
+        candidate_count: 0,
+        latest_iteration: 0,
+        best_quick_fitness: null,
+        best_full_fitness: null,
+        live: true,
+      });
+    }
+
     res.json({ runs: cards });
   });
 
@@ -277,6 +309,33 @@ export function createTransport(
       return;
     }
     res.json(run);
+  });
+
+  // --- GET /api/evolution-live/:evoId/* --- Proxy to live sidecar dashboard
+  app.get("/api/evolution-live/:evoId/*", async (req, res) => {
+    const run = getLiveRun(req.params.evoId);
+    if (!run) {
+      res.status(404).json({ error: `Live evolution run not found: ${req.params.evoId}` });
+      return;
+    }
+    if (run.status === "starting" || run.status === "failed") {
+      res.status(503).json({ error: `Evolution run ${req.params.evoId} is ${run.status} (sidecar not ready)` });
+      return;
+    }
+
+    // Extract the suffix after /api/evolution-live/:evoId/
+    const suffix = (req.params as unknown as Record<string, string>)[0] || "";
+    const targetUrl = `http://127.0.0.1:${run.dashboardPort}/api/${suffix}`;
+
+    try {
+      const proxyRes = await fetch(targetUrl);
+      const data = await proxyRes.text();
+      res.status(proxyRes.status)
+        .setHeader("Content-Type", proxyRes.headers.get("content-type") || "application/json")
+        .send(data);
+    } catch (err) {
+      res.status(502).json({ error: `Failed to proxy to evolution sidecar: ${err}` });
+    }
   });
 
   // --- Static assets (public/) ---
