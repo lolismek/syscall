@@ -158,6 +158,12 @@ def _build_parser() -> argparse.ArgumentParser:
     run_search.add_argument("--kb-static-check-enabled", action=argparse.BooleanOptionalAction, default=True)
     run_search.add_argument("--kb-static-fail-on-warning", action=argparse.BooleanOptionalAction, default=False)
     run_search.add_argument("--kb-verbose", action=argparse.BooleanOptionalAction, default=False)
+    run_search.add_argument(
+        "--yaml-problem-path",
+        type=str,
+        default=None,
+        help="Path to a YAML problem definition file. When set, --problem-id and --kb-* flags are ignored.",
+    )
 
     brev_ensure = sub.add_parser("brev-ensure-instance", help="Ensure Brev instance is running and shell-ready")
     brev_ensure.add_argument("--name", type=str, required=True)
@@ -262,43 +268,61 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run-swarm-search":
-        factories = default_problem_factories()
-        if args.problem_id not in factories:
-            parser.error(f"unknown problem-id: {args.problem_id}; available={','.join(sorted(factories.keys()))}")
-
         backend = args.backend
-        if args.problem_id == "kernelbench_v1" and backend == "python-sim":
-            backend = "cuda"
 
-        problem_config = {
-            "backend": backend,
-            "default_block_size": args.block_size,
-            "seed_count": args.seed_count,
-            "quick_size": args.quick_size,
-            "full_size": args.full_size,
-            "quick_iters": args.quick_iters,
-            "full_iters": args.full_iters,
-            "quick_warmup": args.quick_warmup,
-            "full_warmup": args.full_warmup,
-            "level": args.kb_level,
-            "problem_id": args.kb_problem_id,
-            "dataset_source": args.kb_dataset_source,
-            "dataset_name": args.kb_dataset_name,
-            "dataset_base_path": args.kb_dataset_base_path,
-            "repo_path": args.kb_repo_path,
-            "precision": args.kb_precision,
-            "device": args.kb_device,
-            "timing_method": args.kb_timing_method,
-            "quick_correct_trials": args.kb_quick_correct_trials,
-            "quick_perf_trials": args.kb_quick_perf_trials,
-            "full_correct_trials": args.kb_full_correct_trials,
-            "full_perf_trials": args.kb_full_perf_trials,
-            "build_dir_root": args.kb_build_dir_root,
-            "static_check_enabled": args.kb_static_check_enabled,
-            "static_fail_on_warning": args.kb_static_fail_on_warning,
-            "verbose": args.kb_verbose,
-        }
-        problem = factories[args.problem_id](problem_config)
+        if args.yaml_problem_path:
+            from .plugins.yaml_problem import YamlProblem
+
+            problem = YamlProblem.from_yaml_path(args.yaml_problem_path)
+            # Embed resolved spec into problem_config for remote eval serialization.
+            problem_config = {
+                "backend": problem.config.backend,
+                "precision": problem.config.precision,
+                "ref_source": problem._spec.ref_source,
+                "name": problem._spec.name,
+                "pid": problem._spec.pid,
+            }
+            if problem._spec.description:
+                problem_config["description"] = problem._spec.description
+            if problem._spec.optimization_hints:
+                problem_config["optimization_hints"] = problem._spec.optimization_hints
+        else:
+            factories = default_problem_factories()
+            if args.problem_id not in factories:
+                parser.error(f"unknown problem-id: {args.problem_id}; available={','.join(sorted(factories.keys()))}")
+
+            if args.problem_id == "kernelbench_v1" and backend == "python-sim":
+                backend = "cuda"
+
+            problem_config = {
+                "backend": backend,
+                "default_block_size": args.block_size,
+                "seed_count": args.seed_count,
+                "quick_size": args.quick_size,
+                "full_size": args.full_size,
+                "quick_iters": args.quick_iters,
+                "full_iters": args.full_iters,
+                "quick_warmup": args.quick_warmup,
+                "full_warmup": args.full_warmup,
+                "level": args.kb_level,
+                "problem_id": args.kb_problem_id,
+                "dataset_source": args.kb_dataset_source,
+                "dataset_name": args.kb_dataset_name,
+                "dataset_base_path": args.kb_dataset_base_path,
+                "repo_path": args.kb_repo_path,
+                "precision": args.kb_precision,
+                "device": args.kb_device,
+                "timing_method": args.kb_timing_method,
+                "quick_correct_trials": args.kb_quick_correct_trials,
+                "quick_perf_trials": args.kb_quick_perf_trials,
+                "full_correct_trials": args.kb_full_correct_trials,
+                "full_perf_trials": args.kb_full_perf_trials,
+                "build_dir_root": args.kb_build_dir_root,
+                "static_check_enabled": args.kb_static_check_enabled,
+                "static_fail_on_warning": args.kb_static_fail_on_warning,
+                "verbose": args.kb_verbose,
+            }
+            problem = factories[args.problem_id](problem_config)
         runner = SwarmSearchRunner(
             SearchConfig(
                 workspace=args.workspace,

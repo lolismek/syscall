@@ -4,6 +4,7 @@ import importlib
 import importlib.metadata
 import json
 import logging
+import multiprocessing
 import re
 import sys
 import tempfile
@@ -64,6 +65,91 @@ def _to_bool(value: Any) -> bool:
         if lowered in {"0", "false", "no", "off", ""}:
             return False
     return bool(value)
+
+
+def _subprocess_eval_kernel(
+    conn: Any,
+    ref_source: str,
+    candidate_source: str,
+    build_dir: str,
+    device: int,
+    precision: str,
+    measure_performance: bool,
+    num_correct_trials: int,
+    num_perf_trials: int,
+    timing_method: str,
+    verbose: bool,
+    eval_backend: str,
+    repo_path: str | None = None,
+) -> None:
+    """Target for subprocess kernel evaluation.
+
+    Runs in a spawned process with its own CUDA context so that illegal
+    memory accesses or other GPU faults cannot poison the parent process.
+    Sends a dict back through ``conn`` with the eval result fields.
+    """
+    try:
+        import sys as _sys
+        if repo_path:
+            from pathlib import Path as _Path
+            src_path = str(_Path(repo_path).expanduser() / "src")
+            if src_path not in _sys.path:
+                _sys.path.insert(0, src_path)
+
+        from kernelbench.eval import eval_kernel_against_ref as _kb_eval  # type: ignore[import-untyped]
+        from kernelbench.eval import get_torch_dtype_from_string  # type: ignore[import-untyped]
+
+        precision_dtype = get_torch_dtype_from_string(precision)
+        raw = _kb_eval(
+            original_model_src=ref_source,
+            custom_model_src=candidate_source,
+            num_correct_trials=num_correct_trials,
+            num_perf_trials=num_perf_trials,
+            measure_performance=measure_performance,
+            timing_method=timing_method,
+            verbose=verbose,
+            build_dir=build_dir,
+            device=device,
+            backend=eval_backend,
+            precision=precision_dtype,
+            check_for_excessive_speedup=False,
+        )
+        if raw is None:
+            conn.send({"_error": "KernelBench eval returned None"})
+            return
+
+        def _safe_dict(obj: Any) -> dict[str, Any]:
+            if obj is None:
+                return {}
+            if isinstance(obj, dict):
+                return {str(k): _json_safe(v) for k, v in obj.items()}
+            try:
+                return {str(k): _json_safe(v) for k, v in vars(obj).items()}
+            except TypeError:
+                return {}
+
+        def _json_safe(v: Any) -> Any:
+            if v is None or isinstance(v, (bool, int, float, str)):
+                return v
+            if isinstance(v, (list, tuple)):
+                return [_json_safe(x) for x in v]
+            if isinstance(v, dict):
+                return {str(kk): _json_safe(vv) for kk, vv in v.items()}
+            return str(v)
+
+        conn.send({
+            "compiled": bool(getattr(raw, "compiled", False)),
+            "correctness": bool(getattr(raw, "correctness", False)),
+            "runtime_ms": float(getattr(raw, "runtime", -1.0) or -1.0),
+            "runtime_stats": _safe_dict(getattr(raw, "runtime_stats", {})),
+            "ref_runtime_ms": float(getattr(raw, "ref_runtime", -1.0) or -1.0),
+            "ref_runtime_stats": _safe_dict(getattr(raw, "ref_runtime_stats", {})),
+            "metadata": _safe_dict(getattr(raw, "metadata", {})),
+        })
+    except Exception as exc:
+        conn.send({"_error": f"{type(exc).__name__}: {exc}"})
+    finally:
+        conn.close()
 
 
 @dataclass(slots=True)
@@ -797,30 +883,88 @@ class KernelBenchProblem(OptimizationProblem):
                 eval_backend,
                 self.config.backend,
             )
-        raw = kb_eval.eval_kernel_against_ref(
-            original_model_src=ref_source,
-            custom_model_src=candidate_source,
-            num_correct_trials=num_correct_trials,
-            num_perf_trials=num_perf_trials,
-            measure_performance=measure_performance,
-            timing_method=self.config.timing_method,
-            verbose=self.config.verbose,
+        return self._run_in_subprocess(
+            ref_source=ref_source,
+            candidate_source=candidate_source,
             build_dir=str(build_dir),
             device=device,
-            backend=eval_backend,
-            precision=precision_dtype,
-            check_for_excessive_speedup=False,
+            precision=self.config.precision,
+            measure_performance=measure_performance,
+            num_correct_trials=num_correct_trials,
+            num_perf_trials=num_perf_trials,
+            timing_method=self.config.timing_method,
+            verbose=self.config.verbose,
+            eval_backend=eval_backend,
         )
-        if raw is None:
-            raise RuntimeError("KernelBench eval returned None; likely transient compile-lock contention")
+
+    def _run_in_subprocess(
+        self,
+        *,
+        ref_source: str,
+        candidate_source: str,
+        build_dir: str,
+        device: int,
+        precision: str,
+        measure_performance: bool,
+        num_correct_trials: int,
+        num_perf_trials: int,
+        timing_method: str,
+        verbose: bool,
+        eval_backend: str,
+    ) -> _KernelBenchEvalResult:
+        """Run kernel evaluation in an isolated subprocess.
+
+        A bad kernel (illegal memory access, etc.) poisons the CUDA context
+        for the entire process.  By running each eval in a spawned subprocess
+        with its own CUDA context, one crash cannot affect other evaluations.
+        """
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
+        p = ctx.Process(
+            target=_subprocess_eval_kernel,
+            args=(
+                child_conn,
+                ref_source,
+                candidate_source,
+                build_dir,
+                device,
+                precision,
+                measure_performance,
+                num_correct_trials,
+                num_perf_trials,
+                timing_method,
+                verbose,
+                eval_backend,
+                self.config.repo_path,
+            ),
+            daemon=True,
+        )
+        p.start()
+        child_conn.close()
+
+        # Wait for result with a generous timeout (kernel compile + run).
+        timeout_s = 300
+        if parent_conn.poll(timeout_s):
+            result = parent_conn.recv()
+        else:
+            p.kill()
+            p.join(timeout=5)
+            raise RuntimeError(f"Subprocess eval timed out after {timeout_s}s")
+
+        p.join(timeout=30)
+        parent_conn.close()
+
+        if isinstance(result, dict) and result.get("_error"):
+            raise RuntimeError(result["_error"])
+
         return _KernelBenchEvalResult(
-            compiled=bool(getattr(raw, "compiled", False)),
-            correctness=bool(getattr(raw, "correctness", False)),
-            runtime_ms=self._as_float(getattr(raw, "runtime", -1.0), default=-1.0),
-            runtime_stats=self._json_safe_dict(getattr(raw, "runtime_stats", {})),
-            ref_runtime_ms=self._as_float(getattr(raw, "ref_runtime", -1.0), default=-1.0),
-            ref_runtime_stats=self._json_safe_dict(getattr(raw, "ref_runtime_stats", {})),
-            metadata=self._json_safe_dict(getattr(raw, "metadata", {})),
+            compiled=bool(result.get("compiled", False)),
+            correctness=bool(result.get("correctness", False)),
+            runtime_ms=self._as_float(result.get("runtime_ms", -1.0), default=-1.0),
+            runtime_stats=self._json_safe_dict(result.get("runtime_stats", {})),
+            ref_runtime_ms=self._as_float(result.get("ref_runtime_ms", -1.0), default=-1.0),
+            ref_runtime_stats=self._json_safe_dict(result.get("ref_runtime_stats", {})),
+            metadata=self._json_safe_dict(result.get("metadata", {})),
         )
 
     def _resolve_reference_runtime(

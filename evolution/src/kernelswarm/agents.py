@@ -287,8 +287,8 @@ _STYLE_GUIDANCE = {
     ),
     "correctness_first": (
         "CORRECTNESS FIRST island: Make careful, incremental optimizations. Start with simple "
-        "fusions (e.g., fuse elementwise ops) that are easy to verify. Prefer torch.compile "
-        "or simple Triton kernels over complex hand-written CUDA."
+        "Triton kernels that fuse elementwise ops (e.g., fuse add+multiply, norm+activation). "
+        "Keep the kernel logic straightforward and easy to verify before attempting complex tiling."
     ),
 }
 

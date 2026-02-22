@@ -11,12 +11,13 @@ fi
 WORKSPACE="${1:-${KERNELSWARM_WORKSPACE:-.runs/search-medium-20m}}"
 REMOTE_EVAL_URL="${KERNELSWARM_REMOTE_EVAL_URL:-http://127.0.0.1:18080}"
 REMOTE_EVAL_URL_PRIMARY="${REMOTE_EVAL_URL%%,*}"
+YAML_PROBLEM_PATH="${KERNELSWARM_YAML_PROBLEM_PATH:-}"
 PROBLEM_ID="${KERNELSWARM_PROBLEM_ID:-kernelbench_v1}"
 BACKEND="${KERNELSWARM_BACKEND:-cuda}"
 MAX_MINUTES="${KERNELSWARM_MAX_MINUTES:-20}"
 MAX_ITERATIONS="${KERNELSWARM_MAX_ITERATIONS:-5000}"
 TOKEN_BUDGET="${KERNELSWARM_TOKEN_BUDGET:-2000000}"
-GENERATORS="${KERNELSWARM_GENERATORS:-24}"
+GENERATORS="${KERNELSWARM_GENERATORS:-64}"
 JUDGES="${KERNELSWARM_JUDGES:-10}"
 NEMOTRON_PROVIDER="${KERNELSWARM_NEMOTRON_PROVIDER:-deepinfra}"
 NEMOTRON_MAX_CONCURRENT_REQUESTS="${KERNELSWARM_NEMOTRON_MAX_CONCURRENT_REQUESTS:-10}"
@@ -233,7 +234,7 @@ if ! grep -qE '^(DEEPINFRA_API_KEY|NVIDIA_API_KEY)=' .env; then
   exit 1
 fi
 
-if [ "$KB_DATASET_SOURCE" = "local" ] && [ ! -d "$KB_REPO_PATH" ]; then
+if [ -z "$YAML_PROBLEM_PATH" ] && [ "$KB_DATASET_SOURCE" = "local" ] && [ ! -d "$KB_REPO_PATH" ]; then
   if [ -n "$REMOTE_EVAL_URL" ]; then
     echo "Local KernelBench path not found: $KB_REPO_PATH" >&2
     echo "Continuing because remote eval is enabled; this path is expected to exist on the remote worker." >&2
@@ -244,20 +245,77 @@ if [ "$KB_DATASET_SOURCE" = "local" ] && [ ! -d "$KB_REPO_PATH" ]; then
   fi
 fi
 
+restart_remote_eval_worker() {
+  # Only works for SSH tunnel mode with a user@host target.
+  if [ "$TUNNEL_MODE" != "ssh" ]; then
+    return 0
+  fi
+  if [[ "$TUNNEL_TARGET" != *@* ]]; then
+    return 0
+  fi
+
+  local remote_user remote_host
+  remote_user="${TUNNEL_TARGET%@*}"
+  remote_host="${TUNNEL_TARGET#*@}"
+
+  echo "Restarting eval worker on ${TUNNEL_TARGET}..." >&2
+
+  # Pull latest code, kill old tmux session, start fresh one.
+  ssh "${TUNNEL_SSH_OPTS[@]}" -o ConnectTimeout=10 "$TUNNEL_TARGET" bash -s -- \
+    "$TUNNEL_REMOTE_PORT" "$remote_user" <<'REMOTE_EOF'
+set -eu
+PORT="$1"
+USER_HOME="/home/$2"
+REPO="$USER_HOME/syscall/evolution"
+
+cd "$REPO"
+git pull --ff-only origin "$(git branch --show-current)" 2>&1 || true
+
+# Kill existing eval worker tmux session (if any).
+tmux kill-session -t eval 2>/dev/null || true
+sleep 1
+
+# Start fresh eval worker in tmux.
+tmux new-session -d -s eval \
+  "cd $REPO && PYTHONPATH=src .venv/bin/python -m kernelswarm serve-eval-worker --host 0.0.0.0 --port $PORT 2>&1 | tee /tmp/eval-worker.log"
+
+# Wait for it to become healthy.
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    echo "Eval worker restarted and healthy on port $PORT."
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "WARNING: eval worker not healthy after 10s" >&2
+exit 1
+REMOTE_EOF
+
+  if [ $? -ne 0 ]; then
+    echo "WARNING: failed to restart remote eval worker; continuing anyway." >&2
+  fi
+}
+
 trap cleanup_all EXIT
 trap 'handle_signal INT' INT
 trap 'handle_signal TERM' TERM
+restart_remote_eval_worker
 ensure_remote_eval_ready
 
 echo "Run config:" >&2
 echo "  workspace=$WORKSPACE" >&2
 echo "  remote_eval_url=$REMOTE_EVAL_URL" >&2
 echo "  remote_eval_primary=$REMOTE_EVAL_URL_PRIMARY" >&2
-echo "  problem_id=$PROBLEM_ID backend=$BACKEND" >&2
+if [ -n "$YAML_PROBLEM_PATH" ]; then
+  echo "  yaml_problem_path=$YAML_PROBLEM_PATH" >&2
+else
+  echo "  problem_id=$PROBLEM_ID backend=$BACKEND" >&2
+  echo "  kb_level=$KB_LEVEL kb_problem_id=$KB_PROBLEM_ID kb_precision=$KB_PRECISION" >&2
+  echo "  kb_repo_path=$KB_REPO_PATH" >&2
+fi
 echo "  agents generators=$GENERATORS judges=$JUDGES" >&2
 echo "  llm_provider=$NEMOTRON_PROVIDER llm_max_concurrent_requests=$NEMOTRON_MAX_CONCURRENT_REQUESTS" >&2
-echo "  kb_level=$KB_LEVEL kb_problem_id=$KB_PROBLEM_ID kb_precision=$KB_PRECISION" >&2
-echo "  kb_repo_path=$KB_REPO_PATH" >&2
 echo "  workers proposal=$PROPOSAL_WORKERS quick_eval=$QUICK_EVAL_WORKERS full_eval=$FULL_EVAL_WORKERS" >&2
 echo "  inflight proposals=$MAX_INFLIGHT_PROPOSALS quick=$MAX_INFLIGHT_QUICK_EVALS full=$MAX_INFLIGHT_FULL_EVALS" >&2
 echo "  full_eval_policy periodic_every_quick=$PERIODIC_FULL_EVAL_EVERY_QUICK force_first_per_island=$FORCE_FIRST_FULL_PER_ISLAND" >&2
@@ -272,8 +330,6 @@ echo "Tip: in another terminal run ./scripts/serve_dashboard.sh \"$WORKSPACE\"" 
 run_args=(
   python -m kernelswarm run-swarm-search
   --workspace "$WORKSPACE"
-  --problem-id "$PROBLEM_ID"
-  --backend "$BACKEND"
   --remote-eval-url "$REMOTE_EVAL_URL"
   --max-minutes "$MAX_MINUTES"
   --max-iterations "$MAX_ITERATIONS"
@@ -289,14 +345,23 @@ run_args=(
   --max-inflight-quick-evals "$MAX_INFLIGHT_QUICK_EVALS"
   --max-inflight-full-evals "$MAX_INFLIGHT_FULL_EVALS"
   --periodic-full-eval-every-quick "$PERIODIC_FULL_EVAL_EVERY_QUICK"
-  --kb-level "$KB_LEVEL"
-  --kb-problem-id "$KB_PROBLEM_ID"
-  --kb-dataset-source "$KB_DATASET_SOURCE"
-  --kb-repo-path "$KB_REPO_PATH"
-  --kb-precision "$KB_PRECISION"
-  --kb-quick-perf-trials "$KB_QUICK_PERF_TRIALS"
-  --kb-full-perf-trials "$KB_FULL_PERF_TRIALS"
 )
+
+if [ -n "$YAML_PROBLEM_PATH" ]; then
+  run_args+=(--yaml-problem-path "$YAML_PROBLEM_PATH")
+else
+  run_args+=(
+    --problem-id "$PROBLEM_ID"
+    --backend "$BACKEND"
+    --kb-level "$KB_LEVEL"
+    --kb-problem-id "$KB_PROBLEM_ID"
+    --kb-dataset-source "$KB_DATASET_SOURCE"
+    --kb-repo-path "$KB_REPO_PATH"
+    --kb-precision "$KB_PRECISION"
+    --kb-quick-perf-trials "$KB_QUICK_PERF_TRIALS"
+    --kb-full-perf-trials "$KB_FULL_PERF_TRIALS"
+  )
+fi
 
 if command -v uv >/dev/null 2>&1 && [ "${KERNELSWARM_NO_UV:-0}" != "1" ]; then
   export UV_CACHE_DIR="${UV_CACHE_DIR:-.uv-cache}"
@@ -320,8 +385,6 @@ if [ -x ".venv/bin/python" ]; then
   fallback_args=(
     -m kernelswarm run-swarm-search
     --workspace "$WORKSPACE"
-    --problem-id "$PROBLEM_ID"
-    --backend "$BACKEND"
     --remote-eval-url "$REMOTE_EVAL_URL"
     --max-minutes "$MAX_MINUTES"
     --max-iterations "$MAX_ITERATIONS"
@@ -337,14 +400,22 @@ if [ -x ".venv/bin/python" ]; then
     --max-inflight-quick-evals "$MAX_INFLIGHT_QUICK_EVALS"
     --max-inflight-full-evals "$MAX_INFLIGHT_FULL_EVALS"
     --periodic-full-eval-every-quick "$PERIODIC_FULL_EVAL_EVERY_QUICK"
-    --kb-level "$KB_LEVEL"
-    --kb-problem-id "$KB_PROBLEM_ID"
-    --kb-dataset-source "$KB_DATASET_SOURCE"
-    --kb-repo-path "$KB_REPO_PATH"
-    --kb-precision "$KB_PRECISION"
-    --kb-quick-perf-trials "$KB_QUICK_PERF_TRIALS"
-    --kb-full-perf-trials "$KB_FULL_PERF_TRIALS"
   )
+  if [ -n "$YAML_PROBLEM_PATH" ]; then
+    fallback_args+=(--yaml-problem-path "$YAML_PROBLEM_PATH")
+  else
+    fallback_args+=(
+      --problem-id "$PROBLEM_ID"
+      --backend "$BACKEND"
+      --kb-level "$KB_LEVEL"
+      --kb-problem-id "$KB_PROBLEM_ID"
+      --kb-dataset-source "$KB_DATASET_SOURCE"
+      --kb-repo-path "$KB_REPO_PATH"
+      --kb-precision "$KB_PRECISION"
+      --kb-quick-perf-trials "$KB_QUICK_PERF_TRIALS"
+      --kb-full-perf-trials "$KB_FULL_PERF_TRIALS"
+    )
+  fi
   if [ "$FORCE_FIRST_FULL_PER_ISLAND" = "0" ]; then
     fallback_args+=(--no-force-first-full-per-island)
   fi
