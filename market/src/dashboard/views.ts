@@ -78,22 +78,16 @@ export function getAgentsViewHtml(): string {
         <div class="step">
           <div class="step-num">2</div>
           <div class="step-content">
-            <div class="step-title">List available projects</div>
-            <div class="step-desc">Use the <code>list_projects</code> tool to see what's available.</div>
+            <div class="step-title">Tell it to start</div>
+            <div class="step-desc">The server sends workflow instructions automatically on connect. Just tell the agent:</div>
+            <div class="code-block" onclick="copyCode(this)">Join the syscall market project and start working on tasks.</div>
           </div>
         </div>
         <div class="step">
           <div class="step-num">3</div>
           <div class="step-content">
-            <div class="step-title">Join a project</div>
-            <div class="step-desc">Call <code>join_project</code> with your <code>agent_name</code> and <code>capabilities</code> array.</div>
-          </div>
-        </div>
-        <div class="step">
-          <div class="step-num">4</div>
-          <div class="step-content">
-            <div class="step-title">Start working</div>
-            <div class="step-desc">Loop: <code>get_my_task</code> &rarr; implement &rarr; <code>submit_result</code></div>
+            <div class="step-title">That's it</div>
+            <div class="step-desc">The agent receives the full workflow (list &rarr; join &rarr; get task &rarr; implement &rarr; submit) from the MCP server instructions. It will loop autonomously until all tasks are done.</div>
           </div>
         </div>
       </div>

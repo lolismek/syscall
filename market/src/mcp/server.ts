@@ -38,6 +38,78 @@ function isSubmitRateLimited(agentId: string): boolean {
   return false;
 }
 
+// Agent name pool — server assigns unique names so agents don't collide
+const AGENT_NAMES = [
+  "alice", "bob", "carol", "dave", "eve", "frank", "grace", "heidi",
+  "ivan", "judy", "karl", "lana", "mike", "nina", "oscar", "pam",
+  "quinn", "rose", "steve", "tina", "uma", "vic", "wendy", "xander",
+  "yuki", "zara",
+];
+
+function pickAgentName(registry: ProjectRegistry): string {
+  // Collect all names already in use across all projects
+  const usedNames = new Set<string>();
+  for (const ctx of registry.list()) {
+    for (const agent of ctx.taskBoard.getAllAgents()) {
+      usedNames.add(agent.name.toLowerCase());
+    }
+  }
+  // Pick the first unused name
+  for (const name of AGENT_NAMES) {
+    if (!usedNames.has(name)) return name;
+  }
+  // Fallback: random suffix
+  return "agent-" + Math.random().toString(36).slice(2, 6);
+}
+
+function getServerInstructions(registry: ProjectRegistry): string {
+  // Include live project info so the agent can skip list_projects when there's only one
+  const projects = registry.list().filter(ctx => ctx.project.status !== "stopped");
+  let projectHint = "";
+  if (projects.length === 1) {
+    const p = projects[0];
+    projectHint = `\nThere is currently one active project: "${p.project.name}" (id: ${p.project.id}). You can join it directly.`;
+  } else if (projects.length > 1) {
+    projectHint = "\nThere are " + projects.length + " active projects. Call list_projects first to pick one.";
+  } else {
+    projectHint = "\nNo projects are active yet. Wait for a project to be created, then call list_projects.";
+  }
+
+  return `You are a worker agent for the Syscall Market orchestrator. You have MCP tools connected to the orchestrator.
+${projectHint}
+
+Follow this exact workflow:
+
+1. Call join_project with the project_id and capabilities ["typescript", "general"]. You can omit agent_name — the server assigns a unique name automatically.
+2. Note your agentId and repoUrl from the response.
+3. Clone the repo: git clone <repoUrl> repo
+4. Call get_my_task with your agent_id to get your assignment.
+5. Call report_status with status "in_progress".
+6. Fetch and checkout the assigned branch: cd repo && git fetch origin && git checkout -B <branch> origin/<branch>
+   (If the remote branch doesn't exist yet, just: cd repo && git checkout -b <branch>)
+7. Read the task instructions carefully. Implement the code in the specified filePaths. Write real, working TypeScript code — not placeholders. Only create/modify files listed in your task's filePaths.
+8. Use get_project_context to read any scaffold files on main that your task depends on (e.g. shared types, package.json).
+9. If your code imports from modules created by other tasks, assume they exist — just write correct import statements.
+10. cd repo && git add . && git commit -m "task-XXX: description"
+11. cd repo && git push origin <your-assigned-branch>
+12. Call submit_result with your agent_id and task_id.
+13. Poll check_updates every 10 seconds until status is "accepted" or "rejected".
+14. If rejected, read the feedback, fix the issue in repo/, commit, push, and resubmit.
+15. Once accepted, call get_my_task again for the next task. Fetch and checkout the new branch. Repeat.
+
+CRITICAL RULES:
+- FILE PATHS: The task spec gives paths like "src/data/todoStore.ts" — these are relative to the REPO ROOT. When creating or editing files with your tools, you MUST prepend "repo/" to every path. For example, if the task says filePath "src/data/todoStore.ts", write to "repo/src/data/todoStore.ts". If you write files outside the repo/ directory, git will not see them and your submission will fail.
+- Your working repo is the "repo" subdirectory of your cwd. ALWAYS prefix shell commands with "cd repo && ...".
+- Work ONLY on your assigned branch. Never commit to main.
+- Only create/modify files listed in your task's filePaths. Do not recreate files owned by other tasks.
+- Write complete, functional code — not stubs or placeholders.
+- After committing, you MUST push before calling submit_result.
+- Use get_project_context to read scaffold files and shared types from main when you need context.
+- Use search_docs to search for documentation and code patterns.
+- NEVER stop until get_my_task returns done: true. If it says "No tasks available" but done is false, it means tasks are blocked waiting on other agents. Wait 20 seconds, then call get_my_task again. Keep retrying — do NOT quit.
+- Only stop working when the response contains "done": true, meaning all project tasks are complete.`;
+}
+
 function createMcpServer(
   registry: ProjectRegistry,
   sessionCtx: SessionContext,
@@ -45,6 +117,8 @@ function createMcpServer(
   const server = new McpServer({
     name: "syscall-orchestrator",
     version: "0.1.0",
+  }, {
+    instructions: getServerInstructions(registry),
   });
 
   /** Helper: get the bound project context or return null (null if stopped) */
@@ -99,10 +173,12 @@ function createMcpServer(
     "Register as a worker agent on a specific project. Clone the repoUrl yourself, then call get_my_task.",
     {
       project_id: z.string().describe("The project ID to join (from list_projects)"),
-      agent_name: z.string().describe("Your name / identifier"),
+      agent_name: z.string().optional().describe("Your name (optional — server auto-assigns a unique name if omitted)"),
       capabilities: z.array(z.string()).describe("What you can do, e.g. ['typescript', 'react']"),
     },
     async ({ project_id, agent_name, capabilities }) => {
+      // Auto-assign a unique name if not provided
+      const resolvedName = agent_name || pickAgentName(registry);
       const ctx = registry.get(project_id);
       if (!ctx) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: `Project not found: ${project_id}` }) }] };
@@ -112,7 +188,7 @@ function createMcpServer(
       }
 
       const { project, taskBoard, gitRepo } = ctx;
-      const agent = taskBoard.registerAgent(agent_name, capabilities, project_id);
+      const agent = taskBoard.registerAgent(resolvedName, capabilities, project_id);
 
       // Bind session to this project
       sessionCtx.projectId = project_id;
