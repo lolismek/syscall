@@ -70,12 +70,16 @@ export function startEvolutionRun(prompt: string): { evolutionRunId: string; das
   liveRuns.set(id, run);
 
   // Spawn the search process
-  // Using reduction_v1 (takes ~60-90s) instead of vector_add_v1 (too fast for live demo)
+  // Using softmax YAML problem with remote GPU eval worker (L40S via SSH tunnel)
   const searchArgs = [
     "run", "python", "-m", "kernelswarm", "run-swarm-search",
-    "--problem-id", "reduction_v1",
-    "--backend", "python-sim",
-    "--max-iterations", "300",
+    "--yaml-problem-path", "problems/softmax.yaml",
+    "--remote-eval-url", "http://127.0.0.1:18080",
+    "--nemotron-provider", "deepinfra",
+    "--nemotron-model", "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "--generators", "8",
+    "--max-iterations", "30",
+    "--max-minutes", "10",
     "--workspace", workspacePath,
   ];
 
