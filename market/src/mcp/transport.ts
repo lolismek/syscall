@@ -3,7 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { McpServerFactory, SessionContext } from "./server.js";
 import type { ProjectRegistry } from "../state/project-registry.js";
 import type { GitHubClient } from "../git/github.js";
-import { createProject } from "../orchestrator/create-project.js";
+import { initProject, planAndFinalize } from "../orchestrator/create-project.js";
 import { config } from "../utils/config.js";
 import { createLogger } from "../utils/logger.js";
 import { getNiaEvents } from "../knowledge/nia-client.js";
@@ -133,19 +133,23 @@ export function createTransport(
     }
 
     try {
-      const ctx = await createProject(idea, registry, githubClient, config.workspacePath, {
-        recruitingDurationMs: recruitingDurationSeconds !== undefined ? recruitingDurationSeconds * 1000 : undefined,
-        minAgents,
-      });
+      // Phase 1: Create project shell immediately so the dashboard can show it
+      const ctx = await initProject(idea, registry, config.workspacePath);
+
+      // Return immediately — project is visible on dashboard in "planning" status
       res.status(201).json({
         projectId: ctx.project.id,
         name: ctx.project.name,
         description: ctx.project.description,
         status: ctx.project.status,
-        recruitingUntil: ctx.project.recruitingUntil,
-        minAgents: ctx.project.minAgents,
-        githubUrl: ctx.project.githubRepoUrl,
-        taskCount: ctx.taskBoard.getAllTasks().length,
+      });
+
+      // Phase 2: Plan in background — dashboard polls and sees progress
+      planAndFinalize(ctx, githubClient, config.workspacePath, {
+        recruitingDurationMs: recruitingDurationSeconds !== undefined ? recruitingDurationSeconds * 1000 : undefined,
+        minAgents,
+      }).catch((err) => {
+        log.error(`Background planning failed for ${ctx.project.id}: ${err}`);
       });
     } catch (err) {
       log.error(`Failed to create project: ${err}`);
@@ -190,6 +194,23 @@ export function createTransport(
     ctx.taskBoard.setProject(ctx.project);
     log.info(`Project stopped: ${ctx.project.id} — ${ctx.project.name}`);
     res.json({ message: "Project stopped", projectId: ctx.project.id });
+  });
+
+  // --- DELETE /api/projects/:id --- Delete a project and all its data
+  app.delete("/api/projects/:id", async (req, res) => {
+    const ctx = registry.get(req.params.id);
+    if (!ctx) {
+      res.status(404).json({ error: `Project not found: ${req.params.id}` });
+      return;
+    }
+    try {
+      await registry.delete(req.params.id, config.workspacePath);
+      log.info(`Project deleted: ${req.params.id}`);
+      res.json({ message: "Project deleted", projectId: req.params.id });
+    } catch (err) {
+      log.error(`Failed to delete project ${req.params.id}: ${err}`);
+      res.status(500).json({ error: `Failed to delete project: ${err}` });
+    }
   });
 
   // --- GET /api/status --- Project-specific or all-projects status
@@ -297,7 +318,7 @@ function buildProjectStatus(ctx: import("../state/project-registry.js").ProjectC
       currentTaskId: a.currentTaskId,
     })),
     progress,
-    niaEvents: getNiaEvents(),
+    niaEvents: getNiaEvents(project.id),
     timestamp: new Date().toISOString(),
   };
 }

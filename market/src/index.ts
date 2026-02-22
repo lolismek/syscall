@@ -5,6 +5,8 @@ import { createMcpServerFactory } from "./mcp/server.js";
 import { createTransport } from "./mcp/transport.js";
 import { createProject } from "./orchestrator/create-project.js";
 import { validateSubmission } from "./orchestrator/actions.js";
+import { initDatabase, resetDatabase } from "./state/database.js";
+import { setNiaDb } from "./knowledge/nia-client.js";
 import { config } from "./utils/config.js";
 import { createLogger } from "./utils/logger.js";
 
@@ -103,6 +105,14 @@ async function main() {
     log.info(`Recruiting: ${config.recruitingDurationMs / 1000}s (min agents: ${config.minAgents})`);
   }
 
+  // Initialize database
+  const db = fresh
+    ? resetDatabase(config.workspacePath)
+    : initDatabase(config.workspacePath);
+
+  // Wire Nia events to SQLite
+  setNiaDb(db);
+
   // Initialize GitHub client if configured
   let githubClient: GitHubClient | null = null;
   if (config.githubOrg && config.githubToken) {
@@ -112,10 +122,10 @@ async function main() {
     log.info("GitHub: disabled (set GITHUB_ORG and GITHUB_TOKEN to enable)");
   }
 
-  // Create project registry
-  const registry = new ProjectRegistry();
+  // Create project registry backed by database
+  const registry = new ProjectRegistry(db);
 
-  // Hydrate existing projects from workspace (unless --fresh)
+  // Hydrate existing projects from database (unless --fresh)
   if (!fresh) {
     await registry.hydrateAll(config.workspacePath);
     const existing = registry.list();
@@ -131,7 +141,7 @@ async function main() {
       }
     }
   } else {
-    log.info("Fresh mode — skipping hydration");
+    log.info("Fresh mode — database reset");
   }
 
   // If CLI idea provided, create a project

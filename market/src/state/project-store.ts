@@ -1,78 +1,63 @@
-import fs from "fs/promises";
-import path from "path";
+import type { Database } from "bun:sqlite";
 import { Project } from "../types/project.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("ProjectStore");
 
 export class ProjectStore {
-  private project: Project | null = null;
-  private savePath: string | null = null;
-  private saveQueued = false;
-  private saving = false;
+  private db: Database;
+  private projectId: string;
 
-  setSavePath(savePath: string): void {
-    this.savePath = savePath;
-  }
-
-  private save(): void {
-    if (!this.savePath) return;
-    if (this.saving) {
-      this.saveQueued = true;
-      return;
-    }
-    this._doSave();
-  }
-
-  private async _doSave(): Promise<void> {
-    if (!this.savePath) return;
-    this.saving = true;
-    try {
-      let data: Record<string, unknown> = {};
-      try {
-        const raw = await fs.readFile(this.savePath, "utf-8");
-        data = JSON.parse(raw);
-      } catch {
-        // file doesn't exist yet — TaskBoard will create it
-      }
-      data.project = this.project;
-      const dir = path.dirname(this.savePath);
-      await fs.mkdir(dir, { recursive: true });
-      const tmp = this.savePath + ".tmp";
-      await fs.writeFile(tmp, JSON.stringify(data, null, 2));
-      await fs.rename(tmp, this.savePath);
-    } catch (err) {
-      log.warn(`Failed to save project state: ${err}`);
-    } finally {
-      this.saving = false;
-      if (this.saveQueued) {
-        this.saveQueued = false;
-        this._doSave();
-      }
-    }
+  constructor(db: Database, projectId: string) {
+    this.db = db;
+    this.projectId = projectId;
   }
 
   setProject(project: Project): void {
-    this.project = project;
+    this.db.run(
+      `INSERT OR REPLACE INTO projects (id, name, description, created_at, ready_at, recruiting_until, min_agents, status, github_repo_url, github_repo_name, nia_repo_id, nia_source_ids, next_task_num, short_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT next_task_num FROM projects WHERE id = ?), 1), (SELECT short_id FROM projects WHERE id = ?))`,
+      [
+        project.id,
+        project.name,
+        project.description,
+        project.createdAt.toISOString(),
+        project.readyAt.toISOString(),
+        project.recruitingUntil ? project.recruitingUntil.toISOString() : null,
+        project.minAgents,
+        project.status,
+        project.githubRepoUrl,
+        project.githubRepoName,
+        project.niaRepoId ?? null,
+        project.niaSourceIds ? JSON.stringify(project.niaSourceIds) : "[]",
+        project.id,
+        project.id,
+      ],
+    );
     log.info(`Project set: ${project.id} — ${project.name}`);
-    this.save();
   }
 
   getProject(): Project | null {
-    return this.project;
-  }
-
-  hydrateProject(project: Project): void {
-    project.createdAt = new Date(project.createdAt);
-    this.project = project;
-    log.info(`Hydrated project: ${project.id} — ${project.name}`);
+    const row = this.db.query("SELECT * FROM projects WHERE id = ?").get(this.projectId) as any;
+    if (!row) return null;
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      createdAt: new Date(row.created_at),
+      readyAt: new Date(row.ready_at),
+      recruitingUntil: row.recruiting_until ? new Date(row.recruiting_until) : null,
+      minAgents: row.min_agents,
+      status: row.status,
+      githubRepoUrl: row.github_repo_url,
+      githubRepoName: row.github_repo_name,
+      niaRepoId: row.nia_repo_id ?? undefined,
+      niaSourceIds: row.nia_source_ids ? JSON.parse(row.nia_source_ids) : undefined,
+    };
   }
 
   updateStatus(status: Project["status"]): void {
-    if (this.project) {
-      this.project.status = status;
-      log.info(`Project status → ${status}`);
-      this.save();
-    }
+    this.db.run("UPDATE projects SET status = ? WHERE id = ?", [status, this.projectId]);
+    log.info(`Project status → ${status}`);
   }
 }

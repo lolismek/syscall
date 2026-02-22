@@ -144,9 +144,18 @@ export function getDetailViewHtml(): string {
       </div>
       <span class="badge badge-planning" id="projectBadge">&mdash;</span>
       <button class="btn btn-danger" id="stopBtn" onclick="stopProject()" style="display:none">Stop Project</button>
+      <button class="btn btn-danger" id="deleteBtn" onclick="deleteProject()" style="display:none">Delete Project</button>
       <div class="progress-bar-wrap">
         <div class="progress-label"><span>Progress</span><span id="progressPct">0%</span></div>
         <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="planning-banner" id="planningBanner" style="display:none">
+      <div class="planning-spinner"></div>
+      <div class="planning-banner-text">
+        <strong>Planning in progress</strong><br>
+        The AI is analyzing your idea, designing the architecture, and breaking it into tasks. This usually takes 30–60 seconds.
       </div>
     </div>
 
