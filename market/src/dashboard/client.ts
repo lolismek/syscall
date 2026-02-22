@@ -132,11 +132,10 @@ async function createProject() {
       status.className = "create-status error";
       return;
     }
-    status.textContent = "Created: " + (data.name || data.projectId) + " (" + data.taskCount + " tasks)";
-    status.className = "create-status ok";
+    status.textContent = "";
     input.value = "";
-    fetchProjects();
-    setTimeout(() => selectProject(data.projectId), 800);
+    // Navigate to the project immediately — it shows a planning skeleton
+    selectProject(data.projectId);
   } catch (err) {
     status.textContent = "Network error: " + err.message;
     status.className = "create-status error";
@@ -167,6 +166,30 @@ async function stopProjectById(id) {
   try {
     const res = await fetch(API_BASE + "/api/projects/" + encodeURIComponent(id) + "/stop", { method: "POST" });
     if (!res.ok) { const d = await res.json(); alert(d.error || "Failed"); return; }
+    fetchProjects();
+  } catch (err) { alert("Network error: " + err.message); }
+}
+
+async function deleteProject() {
+  if (!selectedProjectId) return;
+  if (!confirm("Delete this project? All data (tasks, agents, workspace) will be permanently removed.")) return;
+  var btn = document.getElementById("deleteBtn");
+  btn.disabled = true;
+  try {
+    var res = await fetch(API_BASE + "/api/projects/" + encodeURIComponent(selectedProjectId) + "", { method: "DELETE" });
+    if (!res.ok) { var d = await res.json(); alert(d.error || "Failed"); return; }
+    selectedProjectId = null;
+    showView("list");
+    fetchProjects();
+  } catch (err) { alert("Network error: " + err.message); }
+  finally { btn.disabled = false; }
+}
+
+async function deleteProjectById(id) {
+  if (!confirm("Delete this project? All data will be permanently removed.")) return;
+  try {
+    var res = await fetch(API_BASE + "/api/projects/" + encodeURIComponent(id) + "", { method: "DELETE" });
+    if (!res.ok) { var d = await res.json(); alert(d.error || "Failed"); return; }
     fetchProjects();
   } catch (err) { alert("Network error: " + err.message); }
 }
@@ -209,8 +232,11 @@ async function fetchProjects() {
     document.getElementById("projectList").innerHTML = list.map(function(p) {
       const pct = p.taskCount ? Math.round((p.accepted / p.taskCount) * 100) : 0;
       const ghHtml = p.githubUrl ? '<div class="project-card-meta" style="margin-top:4px"><a class="github-link" href="' + esc(p.githubUrl) + '" target="_blank" onclick="event.stopPropagation()">' + esc(p.githubUrl) + '</a></div>' : '';
-      const stopBtnHtml = (p.status !== "stopped" && p.status !== "completed")
+      const stopBtnHtml = (p.status !== "stopped" && p.status !== "completed" && p.status !== "planning")
         ? ' <button class="btn btn-danger btn-sm" style="margin-left:4px" onclick="event.stopPropagation();stopProjectById(\\'' + esc(p.id) + '\\')">Stop</button>'
+        : '';
+      const deleteBtnHtml = (p.status === "stopped" || p.status === "completed")
+        ? ' <button class="btn btn-danger btn-sm" style="margin-left:4px" onclick="event.stopPropagation();deleteProjectById(\\'' + esc(p.id) + '\\')">Delete</button>'
         : '';
       const ringSize = 56;
       const r = (ringSize - 4) / 2;
@@ -224,7 +250,7 @@ async function fetchProjects() {
         + '<div style="height:' + (ringSize/2 - 6) + 'px"></div>';
       return '<div class="project-card" onclick="selectProject(\\'' + esc(p.id) + '\\')">'
         + '<div class="project-card-left">'
-        + '<div class="project-card-name">' + esc(p.name || p.id) + ' <span class="badge badge-' + esc(p.status) + '">' + esc(p.status) + '</span>' + stopBtnHtml + '</div>'
+        + '<div class="project-card-name">' + esc(p.name || p.id) + ' <span class="badge badge-' + esc(p.status) + '">' + esc(p.status) + '</span>' + stopBtnHtml + deleteBtnHtml + '</div>'
         + '<div class="project-card-desc">' + esc(p.description || "") + '</div>'
         + '<div class="project-card-meta">' + esc(p.id) + ' &middot; ' + relTime(p.createdAt) + '</div>'
         + ghHtml
@@ -431,6 +457,31 @@ function renderDepGraph(tasks) {
 
 // ---------- Detail view render ----------
 
+function renderPlanningSkeleton() {
+  var banner = document.getElementById("planningBanner");
+  if (banner) banner.style.display = "flex";
+
+  document.getElementById("depGraph").innerHTML =
+    '<div class="skeleton-card"><div class="skeleton skeleton-line long"></div>'
+    + '<div class="skeleton skeleton-line medium"></div>'
+    + '<div class="skeleton skeleton-line short"></div></div>';
+
+  document.getElementById("taskBoard").innerHTML =
+    '<div class="kanban-column"><div class="kanban-column-title"><span>Tasks</span></div>'
+    + '<div class="skeleton-card"><div class="skeleton skeleton-line long"></div><div class="skeleton skeleton-line medium"></div></div>'
+    + '<div class="skeleton-card"><div class="skeleton skeleton-line medium"></div><div class="skeleton skeleton-line short"></div></div>'
+    + '<div class="skeleton-card"><div class="skeleton skeleton-line long"></div><div class="skeleton skeleton-line short"></div></div>'
+    + '</div>';
+
+  document.getElementById("progressRing").innerHTML = renderProgressRing(0, 90, 5);
+  document.getElementById("ratioText").textContent = "Planning...";
+  document.getElementById("progressPct").textContent = "—";
+  document.getElementById("progressFill").style.width = "0%";
+
+  var al = document.getElementById("agentsList");
+  al.innerHTML = '<div class="empty-state">Agents can join after planning completes</div>';
+}
+
 function renderDetail(data) {
   if (data.project) {
     document.getElementById("breadcrumbName").textContent = data.project.name;
@@ -440,7 +491,9 @@ function renderDetail(data) {
     b.textContent = data.project.status;
     b.className = "badge badge-" + data.project.status;
     var stopBtn = document.getElementById("stopBtn");
-    stopBtn.style.display = (data.project.status !== "stopped" && data.project.status !== "completed") ? "inline-block" : "none";
+    stopBtn.style.display = (data.project.status !== "stopped" && data.project.status !== "completed" && data.project.status !== "planning") ? "inline-block" : "none";
+    var deleteBtn = document.getElementById("deleteBtn");
+    deleteBtn.style.display = (data.project.status === "stopped" || data.project.status === "completed") ? "inline-block" : "none";
     var ghLink = document.getElementById("githubLink");
     if (data.project.githubUrl) {
       ghLink.href = data.project.githubUrl;
@@ -449,6 +502,18 @@ function renderDetail(data) {
     } else {
       ghLink.style.display = "none";
     }
+  }
+
+  // Planning state — show skeleton UI and return early
+  var planningBanner = document.getElementById("planningBanner");
+  if (data.project && data.project.status === "planning") {
+    if (planningBanner) planningBanner.style.display = "flex";
+    renderPlanningSkeleton();
+    document.getElementById("connDot").className = "dot dot-ok";
+    document.getElementById("connLabel").textContent = "connected";
+    return;
+  } else {
+    if (planningBanner) planningBanner.style.display = "none";
   }
 
   // Recruiting banner — update from server and start client-side timer

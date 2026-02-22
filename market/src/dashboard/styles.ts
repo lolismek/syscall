@@ -764,5 +764,61 @@ export function getStyles(port: number): string {
     to { opacity: 1; transform: translateY(0); }
   }
   .fade-in { animation: fadeIn 0.3s ease forwards; }
+
+  /* ===== Planning / Skeleton states ===== */
+  @keyframes shimmer {
+    0% { background-position: -400px 0; }
+    100% { background-position: 400px 0; }
+  }
+  .skeleton {
+    background: linear-gradient(90deg, var(--surface-2) 25%, #3f3f4640 50%, var(--surface-2) 75%);
+    background-size: 800px 100%;
+    animation: shimmer 1.8s ease-in-out infinite;
+    border-radius: 6px;
+  }
+  .skeleton-line {
+    height: 14px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+  }
+  .skeleton-line.short { width: 40%; }
+  .skeleton-line.medium { width: 65%; }
+  .skeleton-line.long { width: 90%; }
+  .planning-banner {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 20px 24px;
+    background: var(--surface);
+    border: 1px solid var(--yellow-dim);
+    border-radius: 12px;
+    margin-bottom: 20px;
+  }
+  .planning-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--yellow-dim);
+    border-top-color: var(--yellow);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .planning-banner-text {
+    font-size: 14px;
+    color: var(--text-secondary);
+  }
+  .planning-banner-text strong {
+    color: var(--yellow);
+    font-weight: 600;
+  }
+  .skeleton-card {
+    background: var(--surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 10px;
+  }
   `;
 }

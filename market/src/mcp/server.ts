@@ -558,13 +558,15 @@ function createMcpServer(
         taskBoard.touchTask(agentRecord.currentTaskId);
       }
 
-      const nia = new NiaClient(config.niaApiKey, agent_id);
+      const nia = new NiaClient(config.niaApiKey, agent_id, project.id);
       try {
         if (scope === "project") {
           // Scoped to THIS project's repo + its dependency docs only
+          const repos = project.niaRepoId ? [project.niaRepoId] : undefined;
+          const sources = project.niaSourceIds?.length ? project.niaSourceIds : undefined;
           const results = await nia.search(query, {
-            repositories: project.niaRepoId ? [project.niaRepoId] : undefined,
-            data_sources: project.niaSourceIds,
+            repositories: repos,
+            data_sources: sources,
           });
           if (!results || results.trim() === "" || results === "{}") {
             return { content: [{ type: "text" as const, text: "No results found (index may still be building). Use get_project_context to read files by path instead." }] };
@@ -613,12 +615,14 @@ function createMcpServer(
         taskBoard.touchTask(agentRecord.currentTaskId);
       }
 
-      const nia = new NiaClient(config.niaApiKey, agent_id);
+      const nia = new NiaClient(config.niaApiKey, agent_id, project.id);
       try {
         // Use scoped search to find and return relevant content
+        const repos = project.niaRepoId ? [project.niaRepoId] : undefined;
+        const sources = project.niaSourceIds?.length ? project.niaSourceIds : undefined;
         const results = await nia.search(query, {
-          repositories: project.niaRepoId ? [project.niaRepoId] : undefined,
-          data_sources: project.niaSourceIds,
+          repositories: repos,
+          data_sources: sources,
         });
         if (!results || results.trim() === "" || results === "{}") {
           return { content: [{ type: "text" as const, text: "No results found (index may still be building). Use get_project_context to read files by path instead." }] };

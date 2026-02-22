@@ -1,9 +1,10 @@
+import type { Database } from "bun:sqlite";
 import fs from "fs/promises";
-import path from "path";
 import { Project } from "../types/project.js";
 import { TaskBoard } from "./task-board.js";
 import { GitRepo } from "../git/repo.js";
 import { createLogger } from "../utils/logger.js";
+import path from "path";
 
 const log = createLogger("Registry");
 
@@ -15,6 +16,11 @@ export interface ProjectContext {
 
 export class ProjectRegistry {
   private projects = new Map<string, ProjectContext>();
+  private db: Database;
+
+  constructor(db: Database) {
+    this.db = db;
+  }
 
   register(project: Project, taskBoard: TaskBoard, gitRepo: GitRepo): ProjectContext {
     const ctx: ProjectContext = { project, taskBoard, gitRepo };
@@ -31,81 +37,66 @@ export class ProjectRegistry {
     return Array.from(this.projects.values());
   }
 
-  /** Scan workspace for existing project state files and hydrate them */
-  async hydrateAll(workspacePath: string): Promise<void> {
-    let entries: string[];
+  /** Delete a project: remove from DB, in-memory map, and workspace directory */
+  async delete(projectId: string, workspacePath: string): Promise<void> {
+    // Delete from DB (order matters for foreign keys)
+    this.db.run("DELETE FROM nia_events WHERE project_id = ?", [projectId]);
+    this.db.run("DELETE FROM agents WHERE project_id = ?", [projectId]);
+    this.db.run("DELETE FROM tasks WHERE project_id = ?", [projectId]);
+    this.db.run("DELETE FROM projects WHERE id = ?", [projectId]);
+
+    // Remove from in-memory map
+    this.projects.delete(projectId);
+
+    // Remove workspace directory
+    const projectDir = path.join(workspacePath, projectId);
     try {
-      entries = await fs.readdir(workspacePath);
-    } catch {
-      log.info("No workspace directory found — nothing to hydrate");
-      return;
+      await fs.rm(projectDir, { recursive: true, force: true });
+    } catch (err) {
+      log.warn(`Failed to remove workspace dir ${projectDir}: ${err}`);
     }
 
-    for (const entry of entries) {
-      const projectDir = path.join(workspacePath, entry);
-      const statePath = path.join(projectDir, "state.json");
+    log.info(`Deleted project: ${projectId}`);
+  }
 
+  /** Hydrate all projects from the database and reconstruct runtime objects */
+  async hydrateAll(workspacePath: string): Promise<void> {
+    const rows = this.db.query("SELECT * FROM projects").all() as any[];
+
+    for (const row of rows) {
       try {
-        const stat = await fs.stat(statePath);
-        if (!stat.isFile()) continue;
-      } catch {
-        continue;
-      }
+        const project: Project = {
+          id: row.id,
+          name: row.name,
+          description: row.description,
+          createdAt: new Date(row.created_at),
+          readyAt: new Date(row.ready_at),
+          recruitingUntil: row.recruiting_until ? new Date(row.recruiting_until) : null,
+          minAgents: row.min_agents,
+          status: row.status,
+          githubRepoUrl: row.github_repo_url,
+          githubRepoName: row.github_repo_name,
+          niaRepoId: row.nia_repo_id ?? undefined,
+          niaSourceIds: row.nia_source_ids ? JSON.parse(row.nia_source_ids) : undefined,
+        };
 
-      try {
-        const raw = await fs.readFile(statePath, "utf-8");
-        const savedState = JSON.parse(raw);
-
-        if (!savedState.project) {
-          log.warn(`State file ${statePath} has no project — skipping`);
-          continue;
+        // Reconstruct runtime objects
+        const taskBoard = new TaskBoard(this.db, project.id);
+        if (row.short_id) {
+          taskBoard.setProjectShortId(row.short_id);
         }
 
-        // Rehydrate project
-        const project: Project = savedState.project;
-        project.createdAt = new Date(project.createdAt);
-        if (project.recruitingUntil) {
-          project.recruitingUntil = new Date(project.recruitingUntil);
-        }
-        // Backfill for projects created before recruiting feature
-        if (project.minAgents === undefined) {
-          project.minAgents = 1;
-        }
-        if ((project as any).recruitingUntil === undefined) {
-          project.recruitingUntil = null;
-        }
-
-        // Rehydrate task board
-        const taskBoard = new TaskBoard();
-        taskBoard.setSavePath(statePath);
-
-        if (savedState.tasks && savedState.agents) {
-          for (const [, task] of savedState.tasks) {
-            task.createdAt = new Date(task.createdAt);
-            task.updatedAt = new Date(task.updatedAt);
-            task.lastActivityAt = task.lastActivityAt ? new Date(task.lastActivityAt) : task.updatedAt;
-          }
-          for (const [, agent] of savedState.agents) {
-            agent.joinedAt = new Date(agent.joinedAt);
-          }
-          taskBoard.hydrate(savedState);
-        }
-
-        if (savedState.projectShortId) {
-          taskBoard.setProjectShortId(savedState.projectShortId);
-        }
-
-        // Create git repo (non-destructive — repo already exists)
+        const projectDir = path.join(workspacePath, project.id);
         const gitRepo = new GitRepo(projectDir);
         await gitRepo.initRepo({ fresh: false });
 
         this.register(project, taskBoard, gitRepo);
         log.info(`Hydrated project: ${project.id} — ${project.name}`);
       } catch (err) {
-        log.warn(`Failed to hydrate project from ${statePath}: ${err}`);
+        log.warn(`Failed to hydrate project ${row.id}: ${err}`);
       }
     }
 
-    log.info(`Hydrated ${this.projects.size} project(s) from workspace`);
+    log.info(`Hydrated ${this.projects.size} project(s) from database`);
   }
 }

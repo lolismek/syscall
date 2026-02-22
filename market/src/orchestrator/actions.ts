@@ -58,7 +58,7 @@ export async function planProject(
   let documentationContext: string | undefined;
   if (config.niaApiKey) {
     try {
-      const nia = new NiaClient(config.niaApiKey);
+      const nia = new NiaClient(config.niaApiKey, undefined, projectId);
       log.info("Researching project technologies via Nia...");
       documentationContext = await nia.webSearch(projectIdea);
       log.info("Nia research complete, enriching planning prompt");
@@ -132,6 +132,7 @@ export async function planProject(
       }
     }
     createdTasks[i].spec.dependencies = resolved;
+    taskBoard.setTaskDependencies(createdTasks[i].id, resolved);
   }
 
   // Cycle detection — break any circular dependencies
@@ -143,7 +144,8 @@ export async function planProject(
     const depId = cycle[cycle.length - 1];
     const target = taskBoard.getTask(targetId);
     if (target) {
-      target.spec.dependencies = target.spec.dependencies.filter((d) => d !== depId);
+      const newDeps = target.spec.dependencies.filter((d) => d !== depId);
+      taskBoard.setTaskDependencies(targetId, newDeps);
       log.warn(`Removed dependency ${depId} from ${targetId}`);
     }
     cycleCheck = taskBoard.hasCyclicDependencies();
@@ -265,7 +267,7 @@ export async function validateSubmission(
       mergeCounters.set(projectId, count);
       if (count % 5 === 0) {
         log.info(`Re-indexing project repo in Nia (merge #${count})`);
-        const nia = new NiaClient(config.niaApiKey);
+        const nia = new NiaClient(config.niaApiKey, undefined, projectId);
         nia.indexRepoAsync(project.niaRepoId);
       }
     }

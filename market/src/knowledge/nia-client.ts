@@ -1,3 +1,4 @@
+import type { Database } from "bun:sqlite";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("Nia");
@@ -12,22 +13,56 @@ export interface NiaEvent {
   agentId?: string;
   status: "started" | "success" | "error";
   durationMs?: number;
+  projectId?: string;
 }
 
-const MAX_EVENTS = 100;
+let _db: Database | null = null;
 
-/** Global event log visible to all NiaClient instances */
-const eventLog: NiaEvent[] = [];
+export function setNiaDb(db: Database): void {
+  _db = db;
+}
 
 function pushEvent(event: NiaEvent): void {
-  eventLog.push(event);
-  if (eventLog.length > MAX_EVENTS) {
-    eventLog.splice(0, eventLog.length - MAX_EVENTS);
+  if (_db) {
+    _db.run(
+      `INSERT INTO nia_events (project_id, timestamp, type, source, detail, agent_id, status, duration_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        event.projectId ?? null,
+        event.timestamp,
+        event.type,
+        event.source,
+        event.detail,
+        event.agentId ?? null,
+        event.status,
+        event.durationMs ?? null,
+      ],
+    );
   }
 }
 
-export function getNiaEvents(): NiaEvent[] {
-  return eventLog;
+export function getNiaEvents(projectId?: string): NiaEvent[] {
+  if (!_db) return [];
+
+  let rows: any[];
+  if (projectId) {
+    rows = _db.query(
+      "SELECT * FROM nia_events WHERE project_id = ? AND status != 'started' ORDER BY id DESC LIMIT 200",
+    ).all(projectId) as any[];
+  } else {
+    rows = _db.query("SELECT * FROM nia_events WHERE status != 'started' ORDER BY id DESC LIMIT 200").all() as any[];
+  }
+
+  return rows.map((r) => ({
+    timestamp: r.timestamp,
+    type: r.type,
+    source: r.source,
+    detail: r.detail,
+    agentId: r.agent_id ?? undefined,
+    status: r.status,
+    durationMs: r.duration_ms ?? undefined,
+    projectId: r.project_id ?? undefined,
+  }));
 }
 
 // Timeouts tuned to actual Nia response times:
@@ -41,10 +76,12 @@ const TIMEOUT_QUERY = 15_000;    // 15s for scoped skip_llm queries
 export class NiaClient {
   private apiKey: string;
   private agentId?: string;
+  private projectId?: string;
 
-  constructor(apiKey: string, agentId?: string) {
+  constructor(apiKey: string, agentId?: string, projectId?: string) {
     this.apiKey = apiKey;
     this.agentId = agentId;
+    this.projectId = projectId;
   }
 
   private async request(path: string, body: Record<string, unknown>, timeoutMs: number, retries = 2): Promise<unknown> {
@@ -90,6 +127,7 @@ export class NiaClient {
       source: "orchestrator",
       detail: repository,
       status: "started",
+      projectId: this.projectId,
     };
     pushEvent(event);
 
@@ -116,6 +154,7 @@ export class NiaClient {
       source: "orchestrator",
       detail: url,
       status: "started",
+      projectId: this.projectId,
     };
     pushEvent(event);
 
@@ -148,6 +187,7 @@ export class NiaClient {
       detail: query,
       agentId: this.agentId,
       status: "started",
+      projectId: this.projectId,
     };
     pushEvent(event);
 
@@ -195,6 +235,7 @@ export class NiaClient {
       detail: query,
       agentId: this.agentId,
       status: "started",
+      projectId: this.projectId,
     };
     pushEvent(event);
 
