@@ -1,6 +1,6 @@
 import { config } from "../utils/config.js";
 import { getStyles } from "./styles.js";
-import { getHeroHtml, getProjectsViewHtml, getAgentsViewHtml, getDetailViewHtml, getEvolutionDetailViewHtml } from "./views.js";
+import { getHeroHtml, getProjectsViewHtml, getAgentsViewHtml, getDetailViewHtml } from "./views.js";
 import { getClientScript } from "./client.js";
 
 export function getDashboardHtml(): string {
@@ -24,7 +24,6 @@ ${getHeroHtml()}
 ${getProjectsViewHtml()}
 ${getAgentsViewHtml()}
 ${getDetailViewHtml()}
-${getEvolutionDetailViewHtml()}
 </div>
 <script>
 ${getClientScript()}

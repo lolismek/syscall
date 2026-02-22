@@ -30,12 +30,14 @@ interface EvolutionRun {
     candidate_id: string;
     scalar_fitness: number;
     median_us: number | null;
+    raw_score?: Record<string, unknown>;
     state: string | null;
   }>;
   leaderboard_full: Array<{
     candidate_id: string;
     scalar_fitness: number;
     median_us: number | null;
+    raw_score?: Record<string, unknown>;
     state: string | null;
   }>;
 }

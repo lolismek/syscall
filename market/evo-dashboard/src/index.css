@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #09090b;
+  --color-surface-50: #18181b;
+  --color-surface-100: #27272a;
+  --color-surface-200: #3f3f46;
+  --color-accent: #22c55e;
+  --color-accent-dim: #166534;
+  --color-warn: #f97316;
+  --color-info: #3b82f6;
+  --color-cuda: #76b900;
+  --radius: 0px;
+}
+
+body {
+  font-family: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+code, pre, .font-mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* Override rounded corners to sharp */
+.rounded-xl { border-radius: 0px; }
+.rounded-lg { border-radius: 0px; }
+.rounded-md { border-radius: 0px; }
+.rounded-full { border-radius: 9999px; } /* keep pills round */
+
+/* Custom scrollbar for code blocks */
+.code-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.code-scroll::-webkit-scrollbar-track {
+  background: var(--color-surface);
+}
+.code-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-surface-200);
+  border-radius: 3px;
+}

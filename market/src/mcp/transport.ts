@@ -338,9 +338,217 @@ export function createTransport(
     }
   });
 
+  // ===== Evolution Dashboard Sub-App API (/evo/api/*) =====
+  // These routes serve the React evolution dashboard at /evo/
+  // They merge static runs (from JSON) and live runs (from sidecar proxy)
+
+  // Cache: live run sidecar internal run_id mapping
+  const liveRunIdCache = new Map<string, string>();
+
+  app.use("/evo/api", (_req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (_req.method === "OPTIONS") { res.sendStatus(204); return; }
+    next();
+  });
+
+  // GET /evo/api/runs — merge static + live runs
+  app.get("/evo/api/runs", async (_req, res) => {
+    const data = getEvolutionData();
+    const runs: Record<string, unknown>[] = data.runs.map((r) => ({
+      run_id: r.id,
+      problem_id: r.problem_id,
+      status: r.status,
+      created_at: r.created_at,
+      summary: {},
+    }));
+
+    // Add live runs
+    for (const live of listLiveRuns()) {
+      if (live.status === "running") {
+        // Try to discover internal run_id from sidecar
+        try {
+          const sidecarRes = await fetch(`http://127.0.0.1:${live.dashboardPort}/api/runs`);
+          if (sidecarRes.ok) {
+            const sidecarData = await sidecarRes.json() as { ok: boolean; runs: Array<{ run_id: string; problem_id: string; status: string; created_at: string }> };
+            for (const sr of sidecarData.runs || []) {
+              liveRunIdCache.set(live.id, sr.run_id);
+              runs.unshift({
+                run_id: live.id,
+                problem_id: sr.problem_id,
+                status: sr.status,
+                created_at: sr.created_at || live.createdAt,
+                summary: {},
+              });
+            }
+          }
+        } catch {
+          // Sidecar not ready
+          runs.unshift({
+            run_id: live.id,
+            problem_id: "starting...",
+            status: live.status,
+            created_at: live.createdAt,
+            summary: {},
+          });
+        }
+      }
+    }
+
+    res.json({ ok: true, runs });
+  });
+
+  // Helper: route to either static data or live sidecar proxy
+  async function handleEvoRunEndpoint(
+    runId: string,
+    endpoint: string,
+    query: Record<string, string>,
+    res: express.Response,
+  ) {
+    // Check live runs first
+    const liveRun = getLiveRun(runId);
+    if (liveRun) {
+      if (liveRun.status !== "running") {
+        res.status(503).json({ error: `Live run ${runId} is ${liveRun.status}` });
+        return;
+      }
+      const internalId = liveRunIdCache.get(runId);
+      if (!internalId) {
+        // Try to discover
+        try {
+          const sidecarRes = await fetch(`http://127.0.0.1:${liveRun.dashboardPort}/api/runs`);
+          const sidecarData = await sidecarRes.json() as { runs: Array<{ run_id: string }> };
+          if (sidecarData.runs?.[0]?.run_id) {
+            liveRunIdCache.set(runId, sidecarData.runs[0].run_id);
+          }
+        } catch {
+          res.status(503).json({ error: "Sidecar not ready" });
+          return;
+        }
+      }
+      const actualId = liveRunIdCache.get(runId);
+      if (!actualId) {
+        res.status(503).json({ error: "Could not discover sidecar run_id" });
+        return;
+      }
+      // Proxy to sidecar
+      const qs = new URLSearchParams(query).toString();
+      const targetUrl = `http://127.0.0.1:${liveRun.dashboardPort}/api/runs/${actualId}/${endpoint}${qs ? "?" + qs : ""}`;
+      try {
+        const proxyRes = await fetch(targetUrl);
+        const data = await proxyRes.text();
+        res.status(proxyRes.status)
+          .setHeader("Content-Type", proxyRes.headers.get("content-type") || "application/json")
+          .send(data);
+      } catch (err) {
+        res.status(502).json({ error: `Failed to proxy: ${err}` });
+      }
+      return;
+    }
+
+    // Static run
+    const run = getEvolutionRun(runId);
+    if (!run) {
+      res.status(404).json({ error: `Run not found: ${runId}` });
+      return;
+    }
+
+    switch (endpoint) {
+      case "overview":
+        res.json({
+          ok: true,
+          overview: {
+            run_id: run.id,
+            problem_id: run.problem_id,
+            status: run.status,
+            created_at: run.created_at,
+            manifest: {},
+            config: {},
+            summary: {},
+            state_counts: run.state_counts,
+            best: run.best,
+            latest_iteration: {
+              iteration: run.latest_iteration,
+              global_best_candidate_id: run.best?.full?.candidate_id ?? run.best?.quick?.candidate_id ?? null,
+              global_best_fitness: run.best?.full?.scalar_fitness ?? run.best?.quick?.scalar_fitness ?? null,
+              total_tokens: run.total_tokens,
+            },
+          },
+        });
+        break;
+
+      case "timeseries":
+        res.json({
+          ok: true,
+          timeseries: {
+            run_id: run.id,
+            global: run.timeseries?.global ?? [],
+            islands: run.timeseries?.islands ?? {},
+          },
+        });
+        break;
+
+      case "states":
+        res.json({
+          ok: true,
+          states: {
+            run_id: run.id,
+            state_counts: run.state_counts,
+          },
+        });
+        break;
+
+      case "leaderboard": {
+        const stage = query.stage === "full" ? "full" : "quick";
+        const limit = Math.min(parseInt(query.limit || "15", 10), 100);
+        const source = stage === "full" ? run.leaderboard_full : run.leaderboard_quick;
+        const rows = (source || []).slice(0, limit).map((e) => ({
+          candidate_id: e.candidate_id,
+          scalar_fitness: e.scalar_fitness,
+          state: e.state,
+          raw_score: e.raw_score ?? { median_us: e.median_us },
+          created_at: run.created_at,
+        }));
+        res.json({ ok: true, stage, rows });
+        break;
+      }
+
+      case "leader-source":
+        res.json({ ok: true, leader: null });
+        break;
+
+      default:
+        res.status(404).json({ error: `Unknown endpoint: ${endpoint}` });
+    }
+  }
+
+  app.get("/evo/api/runs/:id/overview", (req, res) => {
+    handleEvoRunEndpoint(req.params.id, "overview", {}, res);
+  });
+  app.get("/evo/api/runs/:id/timeseries", (req, res) => {
+    handleEvoRunEndpoint(req.params.id, "timeseries", {}, res);
+  });
+  app.get("/evo/api/runs/:id/states", (req, res) => {
+    handleEvoRunEndpoint(req.params.id, "states", {}, res);
+  });
+  app.get("/evo/api/runs/:id/leaderboard", (req, res) => {
+    handleEvoRunEndpoint(req.params.id, "leaderboard", req.query as Record<string, string>, res);
+  });
+  app.get("/evo/api/runs/:id/leader-source", (req, res) => {
+    handleEvoRunEndpoint(req.params.id, "leader-source", req.query as Record<string, string>, res);
+  });
+
   // --- Static assets (public/) ---
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   app.use("/public", express.static(path.resolve(__dirname, "../../public")));
+
+  // --- Serve evolution dashboard static files at /evo/ ---
+  app.use("/evo", express.static(path.resolve(__dirname, "../../public/evo")));
+  // SPA fallback: serve index.html for all unmatched /evo/* paths
+  app.get("/evo/*", (_req, res) => {
+    res.sendFile(path.resolve(__dirname, "../../public/evo/index.html"));
+  });
 
   // --- GET / --- Serve the dashboard
   app.get("/", (_req, res) => {
