@@ -362,10 +362,11 @@ class KernelBenchProblem(OptimizationProblem):
         if self.config.dataset_source not in {"local", "huggingface"}:
             reasons.append("dataset_source must be local or huggingface")
 
-        if self.config.level <= 0:
-            reasons.append("level must be >= 1")
-        if self.config.problem_id <= 0:
-            reasons.append("problem_id must be >= 1")
+        if self.config.dataset_source != "local" or self.config.level != 0:
+            if self.config.level <= 0:
+                reasons.append("level must be >= 1")
+            if self.config.problem_id <= 0:
+                reasons.append("problem_id must be >= 1")
 
         # Reject candidates that drop learnable parameters.
         # If the candidate doesn't delegate to Model (torch.compile wrapper etc.)
