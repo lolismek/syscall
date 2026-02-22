@@ -57,7 +57,7 @@ ref_source: |
           ys = []
           for t in range(seqlen):
               x = deltaA[..., t] * x + deltaB_u[..., t]
-              y = (x * C[:, None, :, t:t+1]).sum(dim=-1)  # (batch, dim)
+              y = (x * C[:, None, :, t]).sum(dim=-1)  # (batch, dim)
               ys.append(y)
           y = torch.stack(ys, dim=-1)  # (batch, dim, seqlen)
 
