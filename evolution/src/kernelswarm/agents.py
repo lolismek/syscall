@@ -34,17 +34,6 @@ class GeneratorDecision:
     usage: NemotronUsage | None = None
 
 
-@dataclass(slots=True)
-class JudgeDecision:
-    stage: str
-    compile_worthy: bool
-    priority_score: float
-    risk_tags: list[str]
-    used_llm: bool
-    reasoning: str = ""
-    usage: NemotronUsage | None = None
-
-
 def _clone_representation(rep: CandidateRepresentation) -> CandidateRepresentation:
     return copy.deepcopy(rep)
 
@@ -651,154 +640,6 @@ class GeneratorAgent:
         return candidate, applied_source_mutations
 
 
-class JudgeAgent:
-    def __init__(
-        self,
-        *,
-        agent_id: str,
-        client: NemotronClient | None,
-    ) -> None:
-        self.agent_id = agent_id
-        self.client = client
-
-    def review(
-        self,
-        *,
-        candidate: Candidate,
-        static: StaticCheckResult,
-        stage: str = "triage",
-        quick_fitness: float | None = None,
-        quick_median_us: float | None = None,
-        island_top_fitness: float | None = None,
-        prompt_context: dict[str, Any] | None = None,
-    ) -> JudgeDecision:
-        stage = (stage or "triage").strip().lower()
-
-        if stage == "triage" and not static.ok:
-            return JudgeDecision(
-                stage=stage,
-                compile_worthy=False,
-                priority_score=0.0,
-                risk_tags=["static_check_failed"],
-                used_llm=False,
-                reasoning="static check failed",
-                usage=None,
-            )
-
-        if stage == "full_gate" and quick_fitness is not None and quick_fitness <= -1e17:
-            return JudgeDecision(
-                stage=stage,
-                compile_worthy=False,
-                priority_score=0.0,
-                risk_tags=["quick_invalid"],
-                used_llm=False,
-                reasoning="quick stage indicates invalid candidate",
-                usage=None,
-            )
-
-        # For KernelBench: skip LLM judge entirely — static check is sufficient.
-        # The LLM judge was trained on CUDA kernels and incorrectly rejects valid
-        # Python-based KernelBench candidates.
-        is_kb = prompt_context is not None and prompt_context.get("mode") == "kernelbench"
-        if is_kb:
-            heuristic_priority = 0.7
-            if stage == "full_gate" and quick_fitness is not None:
-                heuristic_priority = max(0.1, min(1.0, quick_fitness / 200.0))
-            return JudgeDecision(
-                stage=stage,
-                compile_worthy=True,
-                priority_score=heuristic_priority,
-                risk_tags=[],
-                used_llm=False,
-                reasoning="kernelbench auto-allow (static check sufficient)",
-                usage=None,
-            )
-
-        if self.client is None:
-            heuristic_priority = 0.7
-            if stage == "full_gate" and quick_fitness is not None:
-                heuristic_priority = max(0.1, min(1.0, quick_fitness / 200.0))
-            return JudgeDecision(
-                stage=stage,
-                compile_worthy=True,
-                priority_score=heuristic_priority,
-                risk_tags=[],
-                used_llm=False,
-                reasoning="heuristic allow",
-                usage=None,
-            )
-
-        try:
-            response = self.client.chat_json(
-                system_prompt=self._system_prompt(),
-                user_prompt=self._user_prompt(
-                    candidate=candidate,
-                    stage=stage,
-                    quick_fitness=quick_fitness,
-                    quick_median_us=quick_median_us,
-                    island_top_fitness=island_top_fitness,
-                    static=static,
-                ),
-                mode=FAST_MODE,
-            )
-            payload = response.payload
-            return JudgeDecision(
-                stage=stage,
-                compile_worthy=bool(payload.get("compile_worthy", True)),
-                priority_score=max(0.0, min(1.0, float(payload.get("priority_score", 0.7)))),
-                risk_tags=[str(tag) for tag in payload.get("risk_tags", []) if isinstance(tag, (str, int, float))],
-                reasoning=_sanitize_text(payload.get("reasoning"), max_len=600),
-                used_llm=True,
-                usage=response.usage,
-            )
-        except Exception:
-            return JudgeDecision(
-                stage=stage,
-                compile_worthy=True,
-                priority_score=0.7,
-                risk_tags=[],
-                used_llm=False,
-                reasoning="judge fallback allow",
-                usage=None,
-            )
-
-    @staticmethod
-    def _system_prompt() -> str:
-        return (
-            "You are JudgeAgent for CUDA kernel evolution. "
-            "Return strict JSON only: "
-            '{"compile_worthy": bool, "priority_score": number, "risk_tags": array, "reasoning": string}.'
-        )
-
-    @staticmethod
-    def _user_prompt(
-        *,
-        candidate: Candidate,
-        stage: str,
-        quick_fitness: float | None,
-        quick_median_us: float | None,
-        island_top_fitness: float | None,
-        static: StaticCheckResult,
-    ) -> str:
-        rep = candidate.representation
-        source_preview = rep.files[0].content[:1_200] if rep.files else ""
-        return (
-            f"stage={stage}\n"
-            f"candidate_id={candidate.candidate_id}\n"
-            f"params={rep.params}\n"
-            f"launch_block={rep.launch.block}\n"
-            f"compile={rep.compile}\n"
-            f"static_ok={static.ok}\n"
-            f"static_reasons={static.reasons}\n"
-            f"quick_fitness={quick_fitness}\n"
-            f"quick_median_us={quick_median_us}\n"
-            f"island_top_fitness={island_top_fitness}\n"
-            f"source_preview={source_preview}\n"
-            "For stage=triage, decide compile worthiness. "
-            "For stage=full_gate, decide if full benchmark should run."
-        )
-
-
 @dataclass(slots=True)
 class SwarmUsage:
     llm_calls: int = 0
@@ -820,10 +661,8 @@ class SwarmUsage:
 @dataclass(slots=True)
 class SwarmAgentPool:
     generators: list[GeneratorAgent]
-    judges: list[JudgeAgent]
     usage: SwarmUsage = field(default_factory=SwarmUsage)
     _next_generator_idx: int = 0
-    _next_judge_idx: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
@@ -833,7 +672,6 @@ class SwarmAgentPool:
         client: NemotronClient | None,
         rng: random.Random,
         generator_count: int = 32,
-        judge_count: int = 32,
     ) -> "SwarmAgentPool":
         generators = [
             GeneratorAgent(
@@ -843,20 +681,10 @@ class SwarmAgentPool:
             )
             for i in range(generator_count)
         ]
-        judges = [
-            JudgeAgent(agent_id=f"judge-{i:02d}", client=client)
-            for i in range(judge_count)
-        ]
-        return cls(generators=generators, judges=judges)
+        return cls(generators=generators)
 
     def next_generator(self) -> GeneratorAgent:
         with self._lock:
             agent = self.generators[self._next_generator_idx % len(self.generators)]
             self._next_generator_idx += 1
-            return agent
-
-    def next_judge(self) -> JudgeAgent:
-        with self._lock:
-            agent = self.judges[self._next_judge_idx % len(self.judges)]
-            self._next_judge_idx += 1
             return agent

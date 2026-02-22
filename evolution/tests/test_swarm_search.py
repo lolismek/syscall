@@ -226,41 +226,6 @@ class SwarmSearchTests(unittest.TestCase):
             reasons = {str(row[0]) for row in reason_rows}
             self.assertIn("remote_eval_error", reasons)
 
-    def test_full_gate_judge_decision_artifact_is_written(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir)
-            problem = VectorAddProblem(
-                VectorAddConfig(
-                    backend="python-sim",
-                    seed_count=1,
-                    quick_size=512,
-                    full_size=1024,
-                    quick_iters=1,
-                    full_iters=1,
-                    quick_warmup=1,
-                    full_warmup=1,
-                )
-            )
-
-            summary = SwarmSearchRunner(
-                SearchConfig(
-                    workspace=workspace,
-                    max_iterations=8,
-                    max_minutes=1.0,
-                    llm_enabled=False,
-                    force_first_full_per_island=True,
-                    periodic_full_eval_every_quick=100,
-                    proposal_workers=4,
-                    quick_eval_workers=2,
-                    full_eval_workers=1,
-                )
-            ).run(problem)
-            self.assertIsNotNone(summary.run_id)
-
-            run_root = workspace / "artifacts" / summary.run_id
-            full_gate_rows = list(run_root.glob("candidates/*/agent/judge_full_decision.json"))
-            self.assertGreaterEqual(len(full_gate_rows), 1)
-
     def test_summary_best_tracks_full_stage_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

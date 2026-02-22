@@ -95,7 +95,6 @@ def _build_parser() -> argparse.ArgumentParser:
     run_search.add_argument("--resume", action="store_true")
     run_search.add_argument("--resume-run-id", type=str, default=None)
     run_search.add_argument("--generators", type=int, default=32)
-    run_search.add_argument("--judges", type=int, default=32)
     run_search.add_argument("--llm-enabled", action=argparse.BooleanOptionalAction, default=True)
     run_search.add_argument("--llm-disabled", action="store_false", dest="llm_enabled")
     run_search.add_argument(
@@ -338,7 +337,6 @@ def main(argv: list[str] | None = None) -> int:
                 resume=args.resume,
                 resume_run_id=args.resume_run_id,
                 generator_agents=args.generators,
-                judge_agents=args.judges,
                 llm_enabled=args.llm_enabled,
                 nemotron_provider=args.nemotron_provider,
                 nemotron_model=args.nemotron_model,

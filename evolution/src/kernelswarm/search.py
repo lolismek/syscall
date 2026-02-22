@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .agents import GeneratorDecision, JudgeDecision, SwarmAgentPool
+from .agents import GeneratorDecision, SwarmAgentPool
 from .artifacts import ArtifactStore
 from .brev_api import BrevClient, BrevError
 from .hashing import attach_content_hashes
@@ -81,7 +81,6 @@ class SearchConfig:
     resume_run_id: str | None = None
     descriptor_axes: DescriptorAxes = field(default_factory=DescriptorAxes)
     generator_agents: int = 32
-    judge_agents: int = 32
     llm_enabled: bool = True
     nemotron_provider: str = DEFAULT_PROVIDER
     nemotron_model: str = DEFAULT_NEMOTRON_MODEL
@@ -106,7 +105,6 @@ class SearchConfig:
 class CandidateEvaluation:
     candidate: Candidate
     static_check: StaticCheckResult
-    judge: JudgeDecision | None
     build_result: BuildResult | None
     validation_result: ValidationResult | None
     quick_benchmark: BenchmarkResult | None
@@ -115,7 +113,6 @@ class CandidateEvaluation:
     build_execution: BuildExecution | None = None
     full_score: ScoreRecord | None = None
     full_benchmark: BenchmarkResult | None = None
-    full_judge: JudgeDecision | None = None
 
 
 @dataclass(slots=True)
@@ -155,7 +152,6 @@ class SwarmSearchRunner:
             client=llm_client,
             rng=self._rng,
             generator_count=self.config.generator_agents,
-            judge_count=self.config.judge_agents,
         )
         prompt_context = self._get_prompt_context(problem)
         islands = self._init_islands()
@@ -461,36 +457,16 @@ class SwarmSearchRunner:
                         periodic_every = max(0, int(self.config.periodic_full_eval_every_quick))
                         should_periodic = periodic_every > 0 and (island_quick_counts[island_id] % periodic_every == 0)
                         if should_force_first or should_periodic or should_threshold:
-                            top = island.archive.top_elites(1)
-                            island_top_fitness = float(top[0].fitness) if top else None
-                            full_gate = swarm.next_judge().review(
-                                candidate=candidate,
-                                static=eval_result.static_check,
-                                stage="full_gate",
-                                quick_fitness=quick_fitness,
-                                quick_median_us=self._benchmark_median_us(eval_result.quick_benchmark),
-                                island_top_fitness=island_top_fitness,
-                                prompt_context=prompt_context,
-                            )
-                            swarm.usage.add(full_gate.usage)
-                            eval_result.full_judge = full_gate
-                            artifacts.write_json(
-                                artifacts.candidate_dir(candidate.run_id, candidate.candidate_id, "agent")
-                                / "judge_full_decision.json",
-                                full_gate,
-                            )
-
-                            if full_gate.compile_worthy:
-                                island_full_attempts[island_id] = full_attempted + 1
-                                pending_full.append(
-                                    (
-                                        iteration,
-                                        island.policy.island_id,
-                                        candidate,
-                                        eval_result,
-                                        self._select_remote_client(remote_clients, candidate),
-                                    )
+                            island_full_attempts[island_id] = full_attempted + 1
+                            pending_full.append(
+                                (
+                                    iteration,
+                                    island.policy.island_id,
+                                    candidate,
+                                    eval_result,
+                                    self._select_remote_client(remote_clients, candidate),
                                 )
+                            )
 
                     for future in [f for f in full_eval_futures if f.done()]:
                         completed_any = True
@@ -739,23 +715,14 @@ class SwarmSearchRunner:
         )
 
         static_local = problem.static_check(candidate)
-        judge = swarm.next_judge().review(
-            candidate=candidate, static=static_local, stage="triage",
-            prompt_context=prompt_context,
-        )
-        swarm.usage.add(judge.usage)
-        artifacts.write_json(
-            artifacts.candidate_dir(run_id, cid, "agent") / "judge_decision.json",
-            judge,
-        )
 
-        if not judge.compile_worthy:
+        if not static_local.ok:
             score = ScoreRecord(
                 run_id=run_id,
                 candidate_id=cid,
                 stage=BenchmarkStage.QUICK,
                 scalar_fitness=-1e18,
-                raw_score={"fitness": -1e18, "reason": "judge_rejected"},
+                raw_score={"fitness": -1e18, "reason": "static_check_failed"},
             )
             attach_content_hashes(score_record=score)
             store.save_score(score)
@@ -763,20 +730,12 @@ class SwarmSearchRunner:
                 run_id=run_id,
                 candidate_id=cid,
                 from_state=CandidateState.TRIAGED,
-                to_state=CandidateState.REJECTED_STATIC,
-                reason="judge rejected candidate",
-            )
-            store.transition_state(
-                run_id=run_id,
-                candidate_id=cid,
-                from_state=CandidateState.REJECTED_STATIC,
                 to_state=CandidateState.SCORED,
-                reason="scored judge reject",
+                reason="static check failed",
             )
             return CandidateEvaluation(
                 candidate=candidate,
                 static_check=static_local,
-                judge=judge,
                 build_result=None,
                 validation_result=None,
                 quick_benchmark=None,
@@ -817,7 +776,6 @@ class SwarmSearchRunner:
                 return CandidateEvaluation(
                     candidate=candidate,
                     static_check=static_local,
-                    judge=judge,
                     build_result=None,
                     validation_result=None,
                     quick_benchmark=None,
@@ -857,7 +815,6 @@ class SwarmSearchRunner:
             return CandidateEvaluation(
                 candidate=candidate,
                 static_check=static,
-                judge=judge,
                 build_result=None,
                 validation_result=None,
                 quick_benchmark=None,
@@ -913,7 +870,6 @@ class SwarmSearchRunner:
             return CandidateEvaluation(
                 candidate=candidate,
                 static_check=static,
-                judge=judge,
                 build_result=build_result,
                 validation_result=None,
                 quick_benchmark=None,
@@ -963,7 +919,6 @@ class SwarmSearchRunner:
             return CandidateEvaluation(
                 candidate=candidate,
                 static_check=static,
-                judge=judge,
                 build_result=build_result,
                 validation_result=validation,
                 quick_benchmark=None,
@@ -1025,7 +980,6 @@ class SwarmSearchRunner:
         return CandidateEvaluation(
             candidate=candidate,
             static_check=static,
-            judge=judge,
             build_result=build_result,
             validation_result=validation,
             quick_benchmark=benchmark,
@@ -1400,7 +1354,6 @@ class SwarmSearchRunner:
         return CandidateEvaluation(
             candidate=candidate,
             static_check=StaticCheckResult(candidate_id=candidate.candidate_id, ok=False, reasons=[reason]),
-            judge=None,
             build_result=None,
             validation_result=None,
             quick_benchmark=None,

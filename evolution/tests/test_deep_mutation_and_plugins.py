@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 import unittest
 
-from kernelswarm.agents import GeneratorAgent, JudgeAgent
+from kernelswarm.agents import GeneratorAgent
 from kernelswarm.hashing import attach_content_hashes
 from kernelswarm.map_elites import IslandPolicy
 from kernelswarm.models import (
@@ -77,45 +77,6 @@ class DeepMutationTests(unittest.TestCase):
         self.assertIn("// extra mutation", src)
         self.assertIsNotNone(mutated.representation.patch)
         self.assertIn("source_mutations", str(mutated.representation.patch))
-
-    def test_judge_has_stage_specific_behavior(self) -> None:
-        judge = JudgeAgent(agent_id="judge-test", client=None)
-        static_ok = StaticCheckResult(candidate_id="c1", ok=True, reasons=[])
-        dummy = Candidate.new(
-            run_id="run-test",
-            parent_ids=[],
-            origin=CandidateOrigin(island_id="island-a", agent_id="seed", operation="seed"),
-            representation=CandidateRepresentation(
-                language="cuda_cpp",
-                entrypoints=["k"],
-                files=[SourceFile(path="k.cu", content="__global__ void k(){}")],
-            ),
-            track="from_scratch",
-            hypothesis="seed",
-        )
-
-        rejected_full = judge.review(
-            candidate=dummy,
-            static=static_ok,
-            stage="full_gate",
-            quick_fitness=-1e18,
-            quick_median_us=None,
-            island_top_fitness=None,
-        )
-        self.assertFalse(rejected_full.compile_worthy)
-        self.assertEqual(rejected_full.stage, "full_gate")
-
-        accepted_full = judge.review(
-            candidate=dummy,
-            static=static_ok,
-            stage="full_gate",
-            quick_fitness=140.0,
-            quick_median_us=9000.0,
-            island_top_fitness=150.0,
-        )
-        self.assertTrue(accepted_full.compile_worthy)
-        self.assertEqual(accepted_full.stage, "full_gate")
-
 
 class MultiProblemPluginTests(unittest.TestCase):
     def test_reduction_plugin_baseline_flow(self) -> None:
